@@ -2,7 +2,7 @@
 
 client_id = "a38e75661e6c8c4c55b73a4f89ed9b7b"
 
-application_url = "https://noticepro-testing.onrender.com"
+application_url = "https://noticepro-app.onrender.com"
 embedded = true
 name = "NoticePro: Alerts & Countdowns"
 
@@ -36,12 +36,12 @@ api_version = "2026-10"
 
 
 [auth]
-redirect_urls = [ "https://noticepro-testing.onrender.com/auth/callback" ]
+redirect_urls = [ "https://noticepro-app.onrender.com/auth/callback" ]
 
 [build]
 automatically_update_urls_on_dev = false
 
 [app_proxy]
-url = "https://noticepro-testing.onrender.com/api/proxy"
+url = "https://noticepro-app.onrender.com/api/proxy"
 prefix = "apps"
 subpath = "noticepro"
