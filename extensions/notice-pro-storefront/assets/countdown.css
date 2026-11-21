@@ -83,3 +83,29 @@
     gap: 12px;
   }
 }
+
+/* Hidden-days layout: HH : MM : SS */
+.noticepro-countdown-timer--compact {
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.noticepro-countdown-timer--compact .noticepro-countdown-unit {
+  position: relative;
+  text-align: center;
+}
+
+.noticepro-countdown-timer--compact
+  .noticepro-countdown-unit
+  + .noticepro-countdown-unit::before {
+  content: ":";
+  position: absolute;
+  top: 0;
+  left: -8px;
+  width: 4px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+}

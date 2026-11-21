@@ -39,12 +39,8 @@ export default function CountdownPreview({
 
   const days = remaining !== null ? Math.floor(remaining / 86400) : 0;
 
-  const hours =
-    remaining !== null
-      ? showDays
-        ? Math.floor((remaining % 86400) / 3600)
-        : Math.floor(remaining / 3600)
-      : 0;
+  // Hiding days changes visibility only, not the deadline.
+  const hours = remaining !== null ? Math.floor((remaining % 86400) / 3600) : 0;
 
   const minutes = remaining !== null ? Math.floor((remaining % 3600) / 60) : 0;
 
@@ -89,21 +85,40 @@ export default function CountdownPreview({
           aria-live="off"
           style={{
             display: "flex",
-            flexWrap: "wrap",
+            flexWrap: showDays ? "wrap" : "nowrap",
+            alignItems: "flex-start",
             justifyContent: "center",
-            gap: "16px",
+            gap: showDays ? "16px" : "12px",
           }}
         >
-          {units.map((unit) => (
+          {units.map((unit, index) => (
             <div
               key={unit.label}
               style={{
+                position: "relative",
                 display: "grid",
                 gap: "2px",
                 minWidth: "32px",
                 textAlign: "center",
               }}
             >
+              {!showDays && index > 0 && (
+                <span
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: "-8px",
+                    width: "4px",
+                    fontSize: "18px",
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                    textAlign: "center",
+                  }}
+                >
+                  :
+                </span>
+              )}
               <span
                 style={{
                   fontSize: "18px",

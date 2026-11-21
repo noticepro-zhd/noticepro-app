@@ -100,6 +100,7 @@
         wrapper.replaceChildren(bar);
 
         const showDays = countdown.countdownShowDays === true;
+        timer.classList.toggle("noticepro-countdown-timer--compact", !showDays);
         const labels = showDays
           ? ["Days", "Hr", "Min", "Sec"]
           : ["Hr", "Min", "Sec"];
@@ -227,9 +228,8 @@
           }
 
           const days = Math.floor(remaining / 86400);
-          const hours = state.showDays
-            ? Math.floor((remaining % 86400) / 3600)
-            : Math.floor(remaining / 3600);
+          // Keep days in the deadline, but always display hours from 00 to 23.
+          const hours = Math.floor((remaining % 86400) / 3600);
           const minutes = Math.floor((remaining % 3600) / 60);
           const seconds = remaining % 60;
 
