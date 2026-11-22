@@ -9,6 +9,12 @@ import {
 import { widgetScope } from "../features/widgets/widget.server";
 import { getStorefrontWidgetLimit } from "../features/billing/storefront-plan.server";
 
+import {
+  matchesTargeting,
+  readTargetingContext,
+} from "../features/widgets/targeting.shared";
+import { getCachedMatchingCollectionIds } from "../features/widgets/targeting.server";
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.public.appProxy(request);
   const headers = { "Cache-Control": "no-store" };
@@ -38,6 +44,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     select: {
+      targetingMode: true,
+      targetProductIds: true,
+      targetCollectionIds: true,
       id: true,
       message: true,
       backgroundColor: true,
@@ -51,14 +60,62 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   });
 
-  let countdowns = eligibleCountdowns;
+  const context = readTargetingContext(new URL(request.url));
 
-  // Zero or one eligible widget already fits the Free allowance.
-  if (eligibleCountdowns.length > 1) {
+  if (context.pageType === "product" && context.productId !== null) {
+    const candidateCollectionIds = eligibleCountdowns.flatMap((countdown) =>
+      countdown.targetingMode === "COLLECTIONS"
+        ? countdown.targetCollectionIds
+        : [],
+    );
+
+    const matchingCollectionIds = await getCachedMatchingCollectionIds(
+      session.shop,
+      admin,
+      context.productId,
+      candidateCollectionIds,
+    );
+
+    context.collectionIds = matchingCollectionIds ?? [];
+  }
+
+  const matchingCountdowns = eligibleCountdowns.filter((countdown) => {
+    const mode = countdown.targetingMode;
+
+    if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
+      return false;
+    }
+
+    return matchesTargeting(
+      {
+        targetingMode: mode,
+        targetProductIds: countdown.targetProductIds,
+        targetCollectionIds: countdown.targetCollectionIds,
+      },
+      context,
+    );
+  });
+
+  // Keep targeting configuration out of the public response.
+  let countdowns = matchingCountdowns.map((countdown) => ({
+    id: countdown.id,
+    message: countdown.message,
+    backgroundColor: countdown.backgroundColor,
+    textColor: countdown.textColor,
+    countdownEndsAt: countdown.countdownEndsAt,
+    countdownShowDays: countdown.countdownShowDays,
+    countdownSticky: countdown.countdownSticky,
+    countdownDesktopOffset: countdown.countdownDesktopOffset,
+    countdownMobileOffset: countdown.countdownMobileOffset,
+    countdownExpiredText: countdown.countdownExpiredText,
+  }));
+
+  // Apply the display allowance after page matching.
+  if (countdowns.length > 1) {
     const limit = await getStorefrontWidgetLimit(admin, session.shop);
 
     if (limit !== null) {
-      countdowns = eligibleCountdowns.slice(0, limit);
+      countdowns = countdowns.slice(0, limit);
     }
   }
 

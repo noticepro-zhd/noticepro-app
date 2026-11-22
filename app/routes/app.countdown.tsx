@@ -29,6 +29,10 @@ import {
   type AppPlan,
 } from "../features/billing/plan-policy.server";
 
+import WidgetTargetingFields from "../features/widgets/WidgetTargetingFields";
+import { readTargetingForm } from "../features/widgets/targeting.shared";
+import { verifyTargetingSelection } from "../features/widgets/targeting.server";
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
 
@@ -176,6 +180,20 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
+  const targeting = readTargetingForm(formData);
+
+  if (!targeting.ok) {
+    return { error: targeting.error };
+  }
+
+  const targetingVerification = await verifyTargetingSelection(
+    admin,
+    targeting.data,
+  );
+
+  if (!targetingVerification.ok) {
+    return { error: targetingVerification.error };
+  }
   if (status === WIDGET_STATUSES.ACTIVE) {
     // Allow an already-active timer to retain its expired state,
     // but do not newly activate a timer whose deadline has passed.
@@ -217,6 +235,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const countdownData = {
+    ...targeting.data,
     type: WIDGET_TYPES.COUNTDOWN,
     name,
     message,
@@ -466,10 +485,9 @@ export default function CountdownPage() {
               </label>
 
               <p>
-                When days are hidden, the timer will display the total remaining
-                hours instead.
+                When days are hidden, hours display from 00 to 23. Days still
+                count toward the original deadline.
               </p>
-
               <label>
                 <input
                   type="checkbox"
@@ -525,7 +543,20 @@ export default function CountdownPage() {
                   style={countdownInputStyle}
                 />
               </label>
-
+              <WidgetTargetingFields
+                key={`${editingCountdown?.id ?? "new-countdown"}:${location.key}`}
+                initialValue={{
+                  targetingMode:
+                    editingCountdown?.targetingMode === "PRODUCTS"
+                      ? "PRODUCTS"
+                      : editingCountdown?.targetingMode === "COLLECTIONS"
+                        ? "COLLECTIONS"
+                        : "ALL",
+                  targetProductIds: editingCountdown?.targetProductIds ?? [],
+                  targetCollectionIds:
+                    editingCountdown?.targetCollectionIds ?? [],
+                }}
+              />
               <label>
                 Status
                 <select

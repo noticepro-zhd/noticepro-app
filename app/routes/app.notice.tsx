@@ -4,7 +4,10 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
-import { WIDGET_TYPES } from "../features/widgets/widget.constants";
+import {
+  WIDGET_STATUSES,
+  WIDGET_TYPES,
+} from "../features/widgets/widget.constants";
 import {
   activeWidgetScope,
   widgetIdScope,
@@ -17,6 +20,9 @@ import {
   canActivateAnotherWidget,
   type AppPlan,
 } from "../features/billing/plan-policy.server";
+import WidgetTargetingFields from "../features/widgets/WidgetTargetingFields";
+import { readTargetingForm } from "../features/widgets/targeting.shared";
+import { verifyTargetingSelection } from "../features/widgets/targeting.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -60,6 +66,10 @@ export async function action({ request }: ActionFunctionArgs) {
   const actionType = String(formData.get("_action") || "create");
   const widgetId = String(formData.get("widgetId") || "");
 
+  if (!["create", "update", "delete"].includes(actionType)) {
+    return { error: "Invalid Notice action." };
+  }
+
   if (actionType === "delete") {
     if (!widgetId) {
       return {
@@ -99,6 +109,10 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
+  if (status !== WIDGET_STATUSES.DRAFT && status !== WIDGET_STATUSES.ACTIVE) {
+    return { error: "Please choose Draft or Active." };
+  }
+
   if (actionType === "update") {
     if (!widgetId) {
       return {
@@ -116,7 +130,20 @@ export async function action({ request }: ActionFunctionArgs) {
       };
     }
   }
+  const targeting = readTargetingForm(formData);
 
+  if (!targeting.ok) {
+    return { error: targeting.error };
+  }
+
+  const targetingVerification = await verifyTargetingSelection(
+    admin,
+    targeting.data,
+  );
+
+  if (!targetingVerification.ok) {
+    return { error: targetingVerification.error };
+  }
   if (status === "ACTIVE") {
     const activeWidgetCount = await db.widget.count({
       where: activeWidgetScope(
@@ -148,6 +175,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const noticeData = {
+    ...targeting.data,
     type: WIDGET_TYPES.NOTICE,
     name,
     status,
@@ -161,10 +189,14 @@ export async function action({ request }: ActionFunctionArgs) {
   };
 
   if (actionType === "update") {
-    await db.widget.update({
+    const updated = await db.widget.updateMany({
       where: widgetIdScope(session.shop, WIDGET_TYPES.NOTICE, widgetId),
       data: noticeData,
     });
+
+    if (updated.count === 0) {
+      return { error: "The notice could not be found." };
+    }
   } else {
     await db.widget.create({
       data: {
@@ -321,7 +353,19 @@ export default function NoticePage() {
                 label="Allow visitors to close the notice"
                 defaultChecked={editingNotice?.dismissible ?? true}
               />
-
+              <WidgetTargetingFields
+                key={editingNotice?.id ?? "new-notice"}
+                initialValue={{
+                  targetingMode:
+                    editingNotice?.targetingMode === "PRODUCTS"
+                      ? "PRODUCTS"
+                      : editingNotice?.targetingMode === "COLLECTIONS"
+                        ? "COLLECTIONS"
+                        : "ALL",
+                  targetProductIds: editingNotice?.targetProductIds ?? [],
+                  targetCollectionIds: editingNotice?.targetCollectionIds ?? [],
+                }}
+              />
               <s-select
                 label="Save as"
                 name="status"

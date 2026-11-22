@@ -53,6 +53,11 @@ model Widget {
   startsAt DateTime?
   endsAt   DateTime?
 
+  // ALL, PRODUCTS, or COLLECTIONS.
+  // Existing widgets retain their current visibility through ALL.
+  targetingMode          String    @default("ALL")
+  targetProductIds       String[]  @default([])
+  targetCollectionIds    String[]  @default([])
   countdownEndsAt        DateTime?
   countdownTimeZone      String    @default("UTC")
   countdownShowDays      Boolean   @default(false)

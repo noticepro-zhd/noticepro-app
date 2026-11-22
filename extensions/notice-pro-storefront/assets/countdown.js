@@ -22,6 +22,33 @@
       const endpoint = new URL(root.dataset.endpoint, window.location.origin);
       endpoint.searchParams.set("format", "multi");
 
+      const pageType =
+        root.dataset.pageType === "product"
+          ? "product"
+          : root.dataset.pageType === "collection"
+            ? "collection"
+            : "other";
+
+      endpoint.searchParams.set("np_page", pageType);
+      endpoint.searchParams.delete("np_product");
+      endpoint.searchParams.delete("np_collection");
+
+      const numericId = /^[1-9][0-9]*$/;
+
+      if (
+        pageType === "product" &&
+        numericId.test(root.dataset.productId || "")
+      ) {
+        endpoint.searchParams.set("np_product", root.dataset.productId);
+      }
+
+      if (
+        pageType === "collection" &&
+        numericId.test(root.dataset.collectionId || "")
+      ) {
+        endpoint.searchParams.set("np_collection", root.dataset.collectionId);
+      }
+
       const response = await fetch(endpoint.href, {
         credentials: "same-origin",
         headers: { Accept: "application/json" },

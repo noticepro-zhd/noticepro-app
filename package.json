@@ -2,6 +2,7 @@
   "name": "notice-pro-alerts-countdowns",
   "private": true,
   "scripts": {
+    "test": "node --test --experimental-strip-types tests/*.test.mjs",
     "build": "react-router build",
     "dev": "shopify app dev",
     "config:link": "shopify app config link",

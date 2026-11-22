@@ -5,8 +5,8 @@ embedded = true
 name = "NoticePro: Alerts & Countdowns"
 
 [access_scopes]
-# This app currently uses its own database and app proxy, not these Admin API scopes.
-scopes = ""
+# Read products and collections to select and validate widget targeting.
+scopes = "read_products"
 
 [webhooks]
 api_version = "2026-10"

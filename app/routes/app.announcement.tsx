@@ -1,4 +1,10 @@
-import { Form, Link, useActionData, useLoaderData } from "react-router";
+import {
+  Form,
+  Link,
+  useActionData,
+  useLoaderData,
+  useLocation,
+} from "react-router";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import LoadingSubmitButton from "../components/LoadingSubmitButton";
 
@@ -20,7 +26,9 @@ import {
   canActivateAnotherWidget,
   type AppPlan,
 } from "../features/billing/plan-policy.server";
-
+import WidgetTargetingFields from "../features/widgets/WidgetTargetingFields";
+import { readTargetingForm } from "../features/widgets/targeting.shared";
+import { verifyTargetingSelection } from "../features/widgets/targeting.server";
 function toDateTimeLocal(value: Date | null | undefined) {
   if (!value) return "";
 
@@ -50,7 +58,6 @@ function formatScheduleUtc(value: Date | string | null | undefined) {
     hourCycle: "h23",
   }).format(date);
 }
-
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -93,6 +100,10 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const actionType = String(formData.get("_action") || "create");
   const widgetId = String(formData.get("widgetId") || "");
+
+  if (!["create", "update", "delete"].includes(actionType)) {
+    return { error: "Invalid Announcement action." };
+  }
 
   if (actionType === "delete") {
     if (!widgetId) {
@@ -157,6 +168,10 @@ export async function action({ request }: ActionFunctionArgs) {
     };
   }
 
+  if (status !== WIDGET_STATUSES.DRAFT && status !== WIDGET_STATUSES.ACTIVE) {
+    return { error: "Please choose Draft or Active." };
+  }
+
   if (actionType === "update") {
     if (!widgetId) {
       return {
@@ -174,7 +189,20 @@ export async function action({ request }: ActionFunctionArgs) {
       };
     }
   }
+  const targeting = readTargetingForm(formData);
 
+  if (!targeting.ok) {
+    return { error: targeting.error };
+  }
+
+  const targetingVerification = await verifyTargetingSelection(
+    admin,
+    targeting.data,
+  );
+
+  if (!targetingVerification.ok) {
+    return { error: targetingVerification.error };
+  }
   if (status === WIDGET_STATUSES.ACTIVE) {
     const activeWidgetCount = await db.widget.count({
       where: activeWidgetScope(
@@ -208,6 +236,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   const widgetData = {
+    ...targeting.data,
     type: WIDGET_TYPES.ANNOUNCEMENT,
     name,
     status,
@@ -250,6 +279,7 @@ export default function AppHome() {
   const { widgets, editingWidget, plan } = useLoaderData<typeof loader>();
 
   const actionData = useActionData<typeof action>();
+  const location = useLocation();
   const isEditing = Boolean(editingWidget);
 
   return (
@@ -288,7 +318,10 @@ export default function AppHome() {
                 : "We could not verify your current plan. Refresh to retry. Draft saves and deletion remain available; additional Active saves require successful server-side plan verification."}
           </s-banner>
 
-          <Form method="post">
+          <Form
+            method="post"
+            key={`${editingWidget?.id ?? "new-announcement"}:${location.key}`}
+          >
             <input
               type="hidden"
               name="_action"
@@ -400,7 +433,18 @@ export default function AppHome() {
                 label="Allow visitors to close the announcement"
                 defaultChecked={editingWidget?.dismissible ?? true}
               />
-
+              <WidgetTargetingFields
+                initialValue={{
+                  targetingMode:
+                    editingWidget?.targetingMode === "PRODUCTS"
+                      ? "PRODUCTS"
+                      : editingWidget?.targetingMode === "COLLECTIONS"
+                        ? "COLLECTIONS"
+                        : "ALL",
+                  targetProductIds: editingWidget?.targetProductIds ?? [],
+                  targetCollectionIds: editingWidget?.targetCollectionIds ?? [],
+                }}
+              />
               <s-select
                 label="Save as"
                 name="status"

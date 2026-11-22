@@ -8,7 +8,11 @@ import {
 import { widgetScope } from "../features/widgets/widget.server";
 import { getStorefrontWidgetLimit } from "../features/billing/storefront-plan.server";
 import { authenticate } from "../shopify.server";
-
+import {
+  matchesTargeting,
+  readTargetingContext,
+} from "../features/widgets/targeting.shared";
+import { getCachedMatchingCollectionIds } from "../features/widgets/targeting.server";
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.public.appProxy(request);
   const headers = { "Cache-Control": "no-store" };
@@ -37,6 +41,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     select: {
+      targetingMode: true,
+      targetProductIds: true,
+      targetCollectionIds: true,
       id: true,
       message: true,
       buttonText: true,
@@ -48,17 +55,63 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   });
 
-  let announcements = eligibleAnnouncements;
+  const context = readTargetingContext(new URL(request.url));
 
-  // Zero or one eligible widget already fits the Free allowance.
-  if (eligibleAnnouncements.length > 1) {
+  if (context.pageType === "product" && context.productId !== null) {
+    const candidateCollectionIds = eligibleAnnouncements.flatMap(
+      (announcement) =>
+        announcement.targetingMode === "COLLECTIONS"
+          ? announcement.targetCollectionIds
+          : [],
+    );
+
+    const matchingCollectionIds = await getCachedMatchingCollectionIds(
+      session.shop,
+      admin,
+      context.productId,
+      candidateCollectionIds,
+    );
+
+    context.collectionIds = matchingCollectionIds ?? [];
+  }
+
+  const matchingAnnouncements = eligibleAnnouncements.filter((announcement) => {
+    const mode = announcement.targetingMode;
+
+    if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
+      return false;
+    }
+
+    return matchesTargeting(
+      {
+        targetingMode: mode,
+        targetProductIds: announcement.targetProductIds,
+        targetCollectionIds: announcement.targetCollectionIds,
+      },
+      context,
+    );
+  });
+
+  // Keep targeting configuration out of the public response.
+  let announcements = matchingAnnouncements.map((announcement) => ({
+    id: announcement.id,
+    message: announcement.message,
+    buttonText: announcement.buttonText,
+    buttonUrl: announcement.buttonUrl,
+    position: announcement.position,
+    backgroundColor: announcement.backgroundColor,
+    textColor: announcement.textColor,
+    dismissible: announcement.dismissible,
+  }));
+
+  // Apply the display allowance after page matching.
+  if (announcements.length > 1) {
     const limit = await getStorefrontWidgetLimit(admin, session.shop);
 
     if (limit !== null) {
-      announcements = eligibleAnnouncements.slice(0, limit);
+      announcements = announcements.slice(0, limit);
     }
   }
-
   const multiFormat =
     new URL(request.url).searchParams.get("format") === "multi";
 

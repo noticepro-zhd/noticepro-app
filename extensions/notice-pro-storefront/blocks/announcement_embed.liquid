@@ -1,8 +1,10 @@
 <div
   data-noticepro-announcement
   data-endpoint="/apps/noticepro/announcement"
+  data-page-type="{{ request.page_type | escape }}"
+  data-product-id="{% if request.page_type == 'product' %}{{ product.id }}{% endif %}"
+  data-collection-id="{% if request.page_type == 'collection' %}{{ collection.id }}{% endif %}"
 ></div>
-
 {% schema %}
 {
   "name": "NoticePro Announcement",

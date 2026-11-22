@@ -8,6 +8,11 @@ import {
 import { widgetScope } from "../features/widgets/widget.server";
 import { getStorefrontWidgetLimit } from "../features/billing/storefront-plan.server";
 import { authenticate } from "../shopify.server";
+import {
+  matchesTargeting,
+  readTargetingContext,
+} from "../features/widgets/targeting.shared";
+import { getCachedMatchingCollectionIds } from "../features/widgets/targeting.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.public.appProxy(request);
@@ -37,6 +42,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     select: {
+      targetingMode: true,
+      targetProductIds: true,
+      targetCollectionIds: true,
       id: true,
       message: true,
       buttonText: true,
@@ -47,14 +55,59 @@ export async function loader({ request }: LoaderFunctionArgs) {
     },
   });
 
-  let notices = eligibleNotices;
+  const context = readTargetingContext(new URL(request.url));
 
-  // Zero or one eligible widget already fits the Free allowance.
-  if (eligibleNotices.length > 1) {
+  if (context.pageType === "product" && context.productId !== null) {
+    const candidateCollectionIds = eligibleNotices.flatMap((notice) =>
+      notice.targetingMode === "COLLECTIONS" ? notice.targetCollectionIds : [],
+    );
+
+    const matchingCollectionIds = await getCachedMatchingCollectionIds(
+      session.shop,
+      admin,
+      context.productId,
+      candidateCollectionIds,
+    );
+
+    // A failed lookup must not imply collection membership.
+    // ALL and directly targeted product notices can still match.
+    context.collectionIds = matchingCollectionIds ?? [];
+  }
+
+  const matchingNotices = eligibleNotices.filter((notice) => {
+    const mode = notice.targetingMode;
+
+    if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
+      return false;
+    }
+
+    return matchesTargeting(
+      {
+        targetingMode: mode,
+        targetProductIds: notice.targetProductIds,
+        targetCollectionIds: notice.targetCollectionIds,
+      },
+      context,
+    );
+  });
+
+  // Return public widget content only, not targeting configuration.
+  let notices = matchingNotices.map((notice) => ({
+    id: notice.id,
+    message: notice.message,
+    buttonText: notice.buttonText,
+    buttonUrl: notice.buttonUrl,
+    backgroundColor: notice.backgroundColor,
+    textColor: notice.textColor,
+    dismissible: notice.dismissible,
+  }));
+
+  // Apply the display allowance after page matching.
+  if (notices.length > 1) {
     const limit = await getStorefrontWidgetLimit(admin, session.shop);
 
     if (limit !== null) {
-      notices = eligibleNotices.slice(0, limit);
+      notices = notices.slice(0, limit);
     }
   }
 
