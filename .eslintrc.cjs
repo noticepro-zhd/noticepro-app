@@ -25,6 +25,13 @@ module.exports = {
   extends: ["eslint:recommended"],
 
   overrides: [
+    {
+      files: ["extensions/notice-pro-storefront/assets/countdown.js"],
+      rules: {
+        "no-empty": ["error", { allowEmptyCatch: true }],
+      },
+    },
+
     // React
     {
       files: ["**/*.{js,jsx,ts,tsx}"],

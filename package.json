@@ -2,7 +2,9 @@
   "name": "notice-pro-alerts-countdowns",
   "private": true,
   "scripts": {
-    "test": "node --test --experimental-strip-types tests/*.test.mjs",
+    "test": "npm run countdown:check && node --test --experimental-strip-types tests/*.test.mjs",
+    "countdown:generate": "node scripts/countdown-asset.mjs",
+    "countdown:check": "node scripts/countdown-asset.mjs --check",
     "build": "react-router build",
     "dev": "shopify app dev",
     "config:link": "shopify app config link",
