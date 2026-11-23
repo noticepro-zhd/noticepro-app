@@ -9,6 +9,11 @@ import {
   readTargetingContext,
   readTargetingForm,
 } from "../app/features/widgets/targeting.shared.ts";
+import {
+  getNoticeEditorMutationSignal,
+  getNoticeEditorResetKey,
+} from "../app/features/widgets/notice-editor-reset.ts";
+import { redirectWithSuccessToast } from "../app/features/widgets/success-toast.server.ts";
 import { activeWidgetLimitForPlan, canActivateAnotherWidget } from "../app/features/billing/plan-policy.server.ts";
 
 function loadActualRoute(relativePath, mocks) {
@@ -29,6 +34,7 @@ function loadActualRoute(relativePath, mocks) {
     exports: module.exports,
     console,
     URL,
+    URLSearchParams,
     Response,
     FormData,
     Date,
@@ -51,7 +57,11 @@ function loadActualRoute(relativePath, mocks) {
       return mocks.react ?? { useEffect: () => {}, useState: (value) => [value, () => {}] };
     }
     if (specifier === "react/jsx-runtime") {
-      return { jsx: () => null, jsxs: () => null, Fragment: Symbol("Fragment") };
+      return {
+        jsx: () => null,
+        jsxs: () => null,
+        Fragment: Symbol("Fragment"),
+      };
     }
     if (Object.prototype.hasOwnProperty.call(mocks, specifier)) {
       return mocks[specifier];
@@ -102,6 +112,7 @@ function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = 
     "../features/widgets/widget.constants": {
       WIDGET_STATUSES: { DRAFT: "DRAFT", ACTIVE: "ACTIVE" },
       WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+      NOTICE_KINDS: { GENERAL: "GENERAL", DISPATCH: "DISPATCH" },
     },
     "../features/widgets/widget.server": {
       widgetScope: (shopDomain, type) => ({ shopDomain, type }),
@@ -109,11 +120,14 @@ function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = 
       activeWidgetScope: (shopDomain, type, excludeId) => ({
         shopDomain,
         type,
-        ...(excludeId ? { excludeId } : {}),
+        status: "ACTIVE",
+        ...(excludeId ? { id: { not: excludeId } } : {}),
       }),
     },
     "../features/widgets/success-toast.server": {
-      redirectWithSuccessToast: (type, action) => ({ redirect: { type, action } }),
+      redirectWithSuccessToast: (type, action, searchParams) => ({
+        redirect: { type, action, searchParams },
+      }),
     },
     "../features/billing/admin-plan.server": {
       getAuthenticatedAppPlan: async () => {
@@ -138,7 +152,17 @@ function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = 
     "../components/LoadingSubmitButton": { __esModule: true, default: () => null },
     "../features/widgets/WidgetTargetingFields": { __esModule: true, default: () => null },
     "../features/widgets/CountdownPreview": { __esModule: true, default: () => null },
+    "../features/widgets/notice-editor-reset": {
+      getNoticeEditorMutationSignal,
+      getNoticeEditorResetKey,
+    },
   };
+  state.verifiedTargeting = [];
+  mocks["../features/widgets/targeting.server"].verifyTargetingSelection =
+    async (_admin, targeting) => {
+      state.verifiedTargeting.push(targeting);
+      return state.verification;
+    };
   return { mocks, state };
 }
 
@@ -148,9 +172,9 @@ function form(entries) {
   return data;
 }
 
-async function actionRequest(entries) {
+async function actionRequest(entries, url = "https://shop.test/app/test") {
   const data = form(entries);
-  return new Request("https://shop.test/app/test", {
+  return new Request(url, {
     method: "POST",
     body: data,
   });
@@ -193,6 +217,9 @@ test("actual admin routes scope create/update, clear selections, and reject inva
     assert.ok(createdResult.redirect);
     assert.equal(created.data.shopDomain, "shop-a.test");
     assert.equal(created.data.type, type);
+    if (type === "NOTICE") {
+      assert.equal(created.data.noticeKind, "GENERAL");
+    }
     assert.equal(created.data.targetingMode, "ALL");
     assert.deepEqual(created.data.targetProductIds, []);
     assert.deepEqual(created.data.targetCollectionIds, []);
@@ -232,6 +259,612 @@ test("actual admin routes scope create/update, clear selections, and reject inva
     });
     assert.equal(invalid.error, "Please choose a valid targeting option.");
   }
+});
+
+test("actual Notice route persists Dispatch, reopens it, and preserves message and targeting across kind switches", async () => {
+  const db = makeDb();
+  const rows = [];
+  let nextId = 1;
+  let revision = Date.parse("2026-11-23T12:00:00.000Z");
+  const nextRevision = () => new Date(revision++);
+  db.widget.findMany = async ({ where }) => {
+    assert.deepEqual(where, { shopDomain: "shop-a.test", type: "NOTICE" });
+    return rows;
+  };
+  db.widget.findFirst = async ({ where }) => {
+    assert.deepEqual(where, {
+      shopDomain: "shop-a.test",
+      type: "NOTICE",
+      id: where.id,
+    });
+    return rows.find((row) => row.id === where.id) ?? null;
+  };
+  db.widget.create = async ({ data }) => {
+    rows.push({
+      id: `n${nextId++}`,
+      ...data,
+      updatedAt: nextRevision(),
+    });
+    return rows.at(-1);
+  };
+  db.widget.updateMany = async ({ where, data }) => {
+    const row = rows.find(
+      (item) =>
+        item.id === where.id &&
+        item.shopDomain === where.shopDomain &&
+        item.type === where.type,
+    );
+    if (!row) return { count: 0 };
+    Object.assign(row, data, { updatedAt: nextRevision() });
+    return { count: 1 };
+  };
+
+  const { mocks, state } = makeAdminMocks({ db, shop: "shop-a.test" });
+  const route = loadActualRoute("../app/routes/app.notice.tsx", mocks);
+  const productId = "gid://shopify/Product/101";
+  const collectionId = "gid://shopify/Collection/201";
+  const customMessage = "Made to order. Dispatch timing varies by item.";
+
+  const created = await route.action({
+    request: await actionRequest({
+      _action: "create",
+      name: "Dispatch estimate",
+      message: customMessage,
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      targetingMode: "PRODUCTS",
+      targetProductIds: JSON.stringify([productId]),
+      targetCollectionIds: "[]",
+    }),
+  });
+  assert.ok(created.redirect);
+  assert.equal(rows[0].type, "NOTICE");
+  assert.equal(rows[0].noticeKind, "DISPATCH");
+  assert.equal(rows[0].message, customMessage);
+  assert.deepEqual(rows[0].targetProductIds, [productId]);
+  assert.deepEqual(rows[0].targetCollectionIds, []);
+  assert.equal(
+    matchesTargeting(state.verifiedTargeting[0], {
+      pageType: "product",
+      productId,
+      collectionIds: [],
+    }),
+    true,
+  );
+  assert.equal(
+    matchesTargeting(state.verifiedTargeting[0], {
+      pageType: "product",
+      productId: "gid://shopify/Product/999",
+      collectionIds: [],
+    }),
+    false,
+  );
+
+  const firstReload = await route.loader({
+    request: new Request(`https://shop.test/app/notice?edit=${rows[0].id}`),
+  });
+  assert.equal(firstReload.editingNotice.noticeKind, "DISPATCH");
+  assert.equal(firstReload.editingNotice.message, customMessage);
+  assert.deepEqual(firstReload.editingNotice.targetProductIds, [productId]);
+
+  const editedMessage = "Usually dispatches in 1–2 business days.";
+  const updated = await route.action({
+    request: await actionRequest({
+      _action: "update",
+      widgetId: rows[0].id,
+      name: "Dispatch estimate",
+      message: editedMessage,
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      targetingMode: "COLLECTIONS",
+      targetProductIds: "[]",
+      targetCollectionIds: JSON.stringify([collectionId]),
+    }),
+  });
+  assert.ok(updated.redirect);
+  assert.equal(rows[0].noticeKind, "DISPATCH");
+  assert.equal(rows[0].message, editedMessage);
+  assert.deepEqual(rows[0].targetProductIds, []);
+  assert.deepEqual(rows[0].targetCollectionIds, [collectionId]);
+  assert.equal(
+    matchesTargeting(state.verifiedTargeting[1], {
+      pageType: "product",
+      productId,
+      collectionIds: [collectionId],
+    }),
+    true,
+  );
+  assert.equal(
+    matchesTargeting(state.verifiedTargeting[1], {
+      pageType: "product",
+      productId,
+      collectionIds: [],
+    }),
+    false,
+  );
+
+  const reopened = await route.loader({
+    request: new Request(`https://shop.test/app/notice?edit=${rows[0].id}`),
+  });
+  assert.equal(reopened.editingNotice.noticeKind, "DISPATCH");
+  assert.equal(reopened.editingNotice.message, editedMessage);
+  assert.deepEqual(reopened.editingNotice.targetCollectionIds, [collectionId]);
+
+  const switched = await route.action({
+    request: await actionRequest({
+      _action: "update",
+      widgetId: rows[0].id,
+      name: "Dispatch estimate",
+      message: editedMessage,
+      noticeKind: "GENERAL",
+      status: "DRAFT",
+      targetingMode: "COLLECTIONS",
+      targetProductIds: "[]",
+      targetCollectionIds: JSON.stringify([collectionId]),
+    }),
+  });
+  assert.ok(switched.redirect);
+  assert.equal(rows[0].noticeKind, "GENERAL");
+  assert.equal(rows[0].message, editedMessage);
+  assert.deepEqual(rows[0].targetCollectionIds, [collectionId]);
+  const switchedReload = await route.loader({
+    request: new Request(`https://shop.test/app/notice?edit=${rows[0].id}`),
+  });
+  assert.equal(switchedReload.editingNotice.noticeKind, "GENERAL");
+  assert.equal(switchedReload.editingNotice.message, editedMessage);
+  assert.deepEqual(switchedReload.editingNotice.targetCollectionIds, [collectionId]);
+});
+
+test("actual Notice route rejects invalid kinds without writes and shares the Free Active limit", async () => {
+  const db = makeDb();
+  let writes = 0;
+  let countWhere;
+  db.widget.create = async () => { writes += 1; };
+  const existingGeneralActive = {
+    shopDomain: "shop-a.test",
+    type: "NOTICE",
+    status: "ACTIVE",
+    noticeKind: "GENERAL",
+  };
+  db.widget.count = async ({ where }) => {
+    countWhere = where;
+    return Number(
+      existingGeneralActive.shopDomain === where.shopDomain &&
+        existingGeneralActive.type === where.type &&
+        existingGeneralActive.status === where.status,
+    );
+  };
+  const { mocks, state } = makeAdminMocks({ db, shop: "shop-a.test" });
+  const route = loadActualRoute("../app/routes/app.notice.tsx", mocks);
+  const base = {
+    _action: "create",
+    name: "Dispatch",
+    message: "Merchant-written estimate",
+    status: "ACTIVE",
+    targetingMode: "ALL",
+  };
+
+  const invalid = await route.action({
+    request: await actionRequest({ ...base, noticeKind: "DELIVERY" }),
+  });
+  assert.match(invalid.error, /valid Notice kind/i);
+  assert.equal(writes, 0);
+
+  const freeLimit = await route.action({
+    request: await actionRequest({ ...base, noticeKind: "DISPATCH" }),
+  });
+  assert.match(freeLimit.error, /Free plan allows one active Notice/i);
+  assert.deepEqual(countWhere, {
+    shopDomain: "shop-a.test",
+    type: "NOTICE",
+    status: "ACTIVE",
+  });
+  assert.equal(state.planCalls, 1);
+  assert.equal(writes, 0);
+
+  db.widget.deleteMany = async ({ where }) => {
+    assert.deepEqual(where, {
+      shopDomain: "shop-a.test",
+      type: "NOTICE",
+      id: "foreign-notice",
+    });
+    return { count: 0 };
+  };
+  const foreignDelete = await route.action({
+    request: await actionRequest({
+      _action: "delete",
+      widgetId: "foreign-notice",
+    }),
+  });
+  assert.match(foreignDelete.error, /could not be found/i);
+
+  state.plan = "PRO";
+  assert.ok(
+    (
+      await route.action({
+        request: await actionRequest({ ...base, noticeKind: "DISPATCH" }),
+      })
+    ).redirect,
+  );
+  assert.equal(writes, 1);
+
+  state.planError = new Error("billing unavailable");
+  const billingFailure = await route.action({
+    request: await actionRequest({ ...base, noticeKind: "GENERAL" }),
+  });
+  assert.match(billingFailure.error, /could not verify your plan/i);
+  assert.equal(writes, 1);
+
+  const draft = await route.action({
+    request: await actionRequest({
+      ...base,
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+    }),
+  });
+  assert.ok(draft.redirect);
+  assert.equal(writes, 2);
+});
+
+test("Dispatch storefront output reuses Notice targeting, keeps its proxy shape, and renders messages as text", async () => {
+  const db = makeDb();
+  const productId = "gid://shopify/Product/101";
+  const collectionId = "gid://shopify/Collection/201";
+  const unsafeLookingMessage = '<img src=x onerror="alert(1)">';
+  db.widget.findMany = async (args) => {
+    assert.equal(args.where.type, "NOTICE");
+    assert.equal(args.orderBy[0].createdAt, "asc");
+    assert.equal(args.orderBy[1].id, "asc");
+    assert.ok(args.where.AND);
+    return [
+      {
+        id: "dispatch-product",
+        noticeKind: "DISPATCH",
+        targetingMode: "PRODUCTS",
+        targetProductIds: [productId],
+        targetCollectionIds: [],
+        message: unsafeLookingMessage,
+        buttonText: null,
+        buttonUrl: null,
+        backgroundColor: "#111111",
+        textColor: "#FFFFFF",
+        dismissible: true,
+      },
+      {
+        id: "dispatch-collection",
+        noticeKind: "DISPATCH",
+        targetingMode: "COLLECTIONS",
+        targetProductIds: [],
+        targetCollectionIds: [collectionId],
+        message: "Dispatch estimate for this collection",
+        buttonText: null,
+        buttonUrl: null,
+        backgroundColor: "#222222",
+        textColor: "#FFFFFF",
+        dismissible: true,
+      },
+    ];
+  };
+  let membershipCalls = 0;
+  const mocks = {
+    "../shopify.server": {
+      authenticate: {
+        public: {
+          appProxy: async () => ({
+            session: { shop: "shop.test" },
+            admin: {},
+          }),
+        },
+      },
+    },
+    "../db.server": { __esModule: true, default: db },
+    "../features/widgets/widget.constants": {
+      WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
+      WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+    },
+    "../features/widgets/widget.server": {
+      widgetScope: (shop, type) => ({ shopDomain: shop, type }),
+    },
+    "../features/billing/storefront-plan.server": {
+      getStorefrontWidgetLimit: async () => null,
+    },
+    "../features/widgets/targeting.shared": {
+      __esModule: true,
+      matchesTargeting,
+      readTargetingContext,
+      readTargetingForm,
+    },
+    "../features/widgets/targeting.server": {
+      getCachedMatchingCollectionIds: async (_shop, _admin, _product, ids) => {
+        membershipCalls += 1;
+        return ids.includes(collectionId) ? [collectionId] : [];
+      },
+    },
+  };
+  const route = loadActualRoute("../app/routes/api.proxy.notice.ts", mocks);
+  const productResponse = await route.loader({
+    request: new Request(
+      "https://shop.test/apps/noticepro/notice?np_page=product&np_product=101&format=multi",
+    ),
+  });
+  const productBody = await productResponse.json();
+  assert.deepEqual(
+    productBody.notices.map((notice) => notice.id),
+    ["dispatch-product", "dispatch-collection"],
+  );
+  assert.equal(productBody.notices[0].message, unsafeLookingMessage);
+  assert.equal("noticeKind" in productBody.notices[0], false);
+  assert.equal("targetingMode" in productBody.notices[0], false);
+  assert.equal(membershipCalls, 1);
+
+  const collectionResponse = await route.loader({
+    request: new Request(
+      "https://shop.test/apps/noticepro/notice?np_page=collection&np_collection=201&format=multi",
+    ),
+  });
+  const collectionBody = await collectionResponse.json();
+  assert.deepEqual(
+    collectionBody.notices.map((notice) => notice.id),
+    ["dispatch-collection"],
+  );
+  assert.equal(membershipCalls, 1);
+
+  const noticeSource = fs.readFileSync(
+    new URL(
+      "../extensions/notice-pro-storefront/assets/notice.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(noticeSource, /message\.textContent = notice\.message/);
+  assert.doesNotMatch(noticeSource, /\.innerHTML\s*=/);
+});
+
+test("Notice editor reset identity is scoped to destination and its successful mutation", async () => {
+  const db = makeDb();
+  const makeNotice = (id, updatedAt) => ({
+    id,
+    shopDomain: "shop-a.test",
+    type: "NOTICE",
+    name: `Notice ${id}`,
+    status: "DRAFT",
+    noticeKind: "GENERAL",
+    message: `Saved ${id}`,
+    buttonText: null,
+    buttonUrl: null,
+    backgroundColor: "#FEF3C7",
+    textColor: "#111827",
+    dismissible: true,
+    targetingMode: "ALL",
+    targetProductIds: [],
+    targetCollectionIds: [],
+    createdAt: new Date("2026-11-20T12:00:00.000Z"),
+    updatedAt: new Date(updatedAt),
+  });
+  const rows = [
+    makeNotice("a", "2026-11-21T12:00:00.000Z"),
+    makeNotice("b", "2026-11-22T12:00:00.000Z"),
+    makeNotice("c", "2026-11-22T13:00:00.000Z"),
+  ];
+  let nextId = 1;
+  let revision = Date.parse("2026-11-23T12:00:00.000Z");
+  let writes = 0;
+  db.widget.findMany = async ({ where }) => {
+    assert.deepEqual(where, { shopDomain: "shop-a.test", type: "NOTICE" });
+    return [...rows].sort((left, right) => right.createdAt - left.createdAt);
+  };
+  db.widget.findFirst = async ({ where }) =>
+    rows.find(
+      (row) =>
+        row.id === where.id &&
+        row.shopDomain === where.shopDomain &&
+        row.type === where.type,
+    ) ?? null;
+  db.widget.create = async ({ data }) => {
+    writes += 1;
+    const now = new Date(revision++);
+    const row = makeNotice(`new-${nextId++}`, now);
+    row.createdAt = now;
+    Object.assign(row, data);
+    rows.push(row);
+    return row;
+  };
+  db.widget.updateMany = async ({ where, data }) => {
+    const row = rows.find(
+      (item) =>
+        item.id === where.id &&
+        item.shopDomain === where.shopDomain &&
+        item.type === where.type,
+    );
+    if (!row) return { count: 0 };
+    writes += 1;
+    Object.assign(row, data, { updatedAt: new Date(revision++) });
+    return { count: 1 };
+  };
+  db.widget.deleteMany = async ({ where }) => {
+    const index = rows.findIndex(
+      (row) =>
+        row.id === where.id &&
+        row.shopDomain === where.shopDomain &&
+        row.type === where.type,
+    );
+    if (index < 0) return { count: 0 };
+    rows.splice(index, 1);
+    return { count: 1 };
+  };
+
+  const { mocks } = makeAdminMocks({ db, shop: "shop-a.test" });
+  const route = loadActualRoute("../app/routes/app.notice.tsx", mocks);
+  const load = (query = "") =>
+    route.loader({
+      request: new Request(`https://shop.test/app/notice${query}`),
+    });
+  const editorKey = (data, signal = null) =>
+    getNoticeEditorResetKey(data.editingNotice?.id ?? null, signal);
+
+  const initialCreate = await load();
+  const ordinaryCreateRerender = await load();
+  const initialCreateKey = editorKey(initialCreate);
+  assert.equal(editorKey(ordinaryCreateRerender), initialCreateKey);
+
+  const failedCreate = await route.action({
+    request: await actionRequest({
+      _action: "create",
+      name: "Unsaved",
+      message: "",
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      backgroundColor: "#123456",
+      targetingMode: "ALL",
+    }),
+  });
+  assert.match(failedCreate.error, /notice message/i);
+  assert.equal(writes, 0);
+
+  rows.push(makeNotice("external-create", "2026-11-23T12:00:00.000Z"));
+  const afterUnrelatedCreate = await load();
+  assert.equal(editorKey(afterUnrelatedCreate), initialCreateKey);
+
+  rows.find((row) => row.id === "b").updatedAt = new Date(
+    "2026-11-23T12:01:00.000Z",
+  );
+  const afterUnrelatedUpdate = await load();
+  assert.equal(editorKey(afterUnrelatedUpdate), initialCreateKey);
+
+  rows.splice(rows.findIndex((row) => row.id === "external-create"), 1);
+  const afterUnrelatedDelete = await load();
+  assert.equal(editorKey(afterUnrelatedDelete), initialCreateKey);
+
+  const created = await route.action({
+    request: await actionRequest({
+      _action: "create",
+      name: "New Dispatch",
+      message: "Merchant-written estimate",
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      backgroundColor: "#123456",
+      targetingMode: "ALL",
+    }),
+  });
+  assert.ok(created.redirect);
+  assert.equal(created.redirect.action, "created");
+  const freshCreate = await load();
+  const createSignal = getNoticeEditorMutationSignal(
+    "?noticeproToast=notice.created&noticeproToastId=create-1",
+  );
+  assert.ok(createSignal);
+  const freshCreateKey = editorKey(freshCreate, createSignal);
+  assert.notEqual(freshCreateKey, initialCreateKey);
+  assert.equal(freshCreate.editingNotice, null);
+  assert.equal(freshCreate.notices[0].noticeKind, "DISPATCH");
+  assert.equal(
+    getNoticeEditorMutationSignal("", createSignal),
+    createSignal,
+    "removing toast query parameters must not remount the editor again",
+  );
+  assert.equal(editorKey(await load(), createSignal), freshCreateKey);
+
+  const editingA = await load("?edit=a");
+  const editingB = await load("?edit=b");
+  const editingAKey = editorKey(editingA, createSignal);
+  assert.notEqual(editorKey(editingB, createSignal), editingAKey);
+  assert.equal(editingA.editingNotice.id, "a");
+  assert.equal(editingB.editingNotice.id, "b");
+
+  const beforeFailedEditKey = editingAKey;
+  const failedEdit = await route.action({
+    request: await actionRequest({
+      _action: "update",
+      widgetId: "a",
+      name: "Unsaved A",
+      message: "Unsaved custom message",
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      backgroundColor: "#654321",
+      targetingMode: "PRODUCTS",
+      targetProductIds: "[]",
+    }),
+  });
+  assert.match(failedEdit.error, /select between/i);
+  assert.equal(writes, 1);
+
+  rows.find((row) => row.id === "a").updatedAt = new Date(
+    "2026-11-23T12:02:00.000Z",
+  );
+  rows.find((row) => row.id === "b").updatedAt = new Date(
+    "2026-11-23T12:03:00.000Z",
+  );
+  rows.push(makeNotice("concurrent-create", "2026-11-23T12:04:00.000Z"));
+  rows.splice(rows.findIndex((row) => row.id === "c"), 1);
+  assert.equal(
+    editorKey(await load("?edit=a"), createSignal),
+    beforeFailedEditKey,
+    "failed submissions and concurrent Notice changes retain the same editor identity",
+  );
+
+  const unrelatedDelete = await route.action({
+    request: await actionRequest(
+      { _action: "delete", widgetId: "concurrent-create" },
+      "https://shop.test/app/notice?edit=a",
+    ),
+  });
+  assert.equal(unrelatedDelete.redirect.action, "deleted");
+  assert.equal(unrelatedDelete.redirect.searchParams.get("edit"), "a");
+  const deleteSignal = getNoticeEditorMutationSignal(
+    "?edit=a&noticeproToast=notice.deleted&noticeproToastId=delete-1",
+    createSignal,
+  );
+  assert.equal(deleteSignal, createSignal);
+  assert.equal(editorKey(await load("?edit=a"), deleteSignal), editingAKey);
+
+  const cancelledEdit = await load();
+  assert.notEqual(editorKey(cancelledEdit, createSignal), editingAKey);
+  assert.equal(cancelledEdit.editingNotice, null);
+
+  const savedEdit = await route.action({
+    request: await actionRequest({
+      _action: "update",
+      widgetId: "a",
+      name: "Updated A",
+      message: "Saved custom message",
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      backgroundColor: "#654321",
+      targetingMode: "ALL",
+    }),
+  });
+  assert.ok(savedEdit.redirect);
+  assert.equal(savedEdit.redirect.action, "updated");
+  const createAfterEdit = await load();
+  const updateSignal = getNoticeEditorMutationSignal(
+    "?noticeproToast=notice.updated&noticeproToastId=update-1",
+  );
+  assert.ok(updateSignal);
+  assert.notEqual(editorKey(createAfterEdit, updateSignal), editingAKey);
+  assert.equal(createAfterEdit.editingNotice, null);
+  assert.equal(rows.find((row) => row.id === "a").message, "Saved custom message");
+  assert.equal(rows.find((row) => row.id === "a").noticeKind, "DISPATCH");
+  const reopened = await load("?edit=a");
+  assert.equal(reopened.editingNotice.message, "Saved custom message");
+  assert.equal(reopened.editingNotice.noticeKind, "DISPATCH");
+  assert.equal(writes, 2);
+});
+
+test("success toast redirects preserve editor destination and toast parameters", () => {
+  const response = redirectWithSuccessToast(
+    "notice",
+    "deleted",
+    new URLSearchParams({ edit: "notice-a" }),
+  );
+  const destination = new URL(
+    response.headers.get("Location"),
+    "https://shop.test",
+  );
+
+  assert.equal(destination.pathname, "/app/notice");
+  assert.equal(destination.searchParams.get("edit"), "notice-a");
+  assert.equal(destination.searchParams.get("noticeproToast"), "notice.deleted");
+  assert.match(destination.searchParams.get("noticeproToastId") ?? "", /^[\da-f-]{36}$/i);
 });
 
 test("actual countdown route validates, persists countdown fields, and allows already-Active expired edits", async () => {

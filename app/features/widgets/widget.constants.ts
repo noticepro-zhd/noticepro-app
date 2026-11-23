@@ -13,3 +13,10 @@ export const WIDGET_STATUSES = {
 
 export type WidgetStatus =
   (typeof WIDGET_STATUSES)[keyof typeof WIDGET_STATUSES];
+
+export const NOTICE_KINDS = {
+  GENERAL: "GENERAL",
+  DISPATCH: "DISPATCH",
+} as const;
+
+export type NoticeKind = (typeof NOTICE_KINDS)[keyof typeof NOTICE_KINDS];

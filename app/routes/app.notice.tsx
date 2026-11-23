@@ -1,10 +1,18 @@
-import { Form, Link, useActionData, useLoaderData } from "react-router";
+import {
+  Form,
+  Link,
+  useActionData,
+  useLoaderData,
+  useLocation,
+} from "react-router";
+import { useEffect, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 import {
+  NOTICE_KINDS,
   WIDGET_STATUSES,
   WIDGET_TYPES,
 } from "../features/widgets/widget.constants";
@@ -21,8 +29,15 @@ import {
   type AppPlan,
 } from "../features/billing/plan-policy.server";
 import WidgetTargetingFields from "../features/widgets/WidgetTargetingFields";
+import {
+  getNoticeEditorMutationSignal,
+  getNoticeEditorResetKey,
+} from "../features/widgets/notice-editor-reset";
 import { readTargetingForm } from "../features/widgets/targeting.shared";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
+
+const DISPATCH_EXAMPLE =
+  "Made to order. Usually dispatches within 1–2 business days.";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -85,7 +100,17 @@ export async function action({ request }: ActionFunctionArgs) {
       return { error: "The notice could not be found." };
     }
 
-    return redirectWithSuccessToast("notice", "deleted");
+    const editId = new URL(request.url).searchParams.get("edit");
+    const preservedSearchParams =
+      editId && editId !== widgetId
+        ? new URLSearchParams({ edit: editId })
+        : undefined;
+
+    return redirectWithSuccessToast(
+      "notice",
+      "deleted",
+      preservedSearchParams,
+    );
   }
 
   const name = String(formData.get("name") || "").trim();
@@ -96,6 +121,11 @@ export async function action({ request }: ActionFunctionArgs) {
   const textColor = String(formData.get("textColor") || "#111827");
   const status = String(formData.get("status") || "DRAFT");
   const dismissible = formData.get("dismissible") === "on";
+  const submittedNoticeKind = formData.get("noticeKind");
+  const noticeKind =
+    submittedNoticeKind === null
+      ? NOTICE_KINDS.GENERAL
+      : submittedNoticeKind;
 
   if (!name) {
     return {
@@ -111,6 +141,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (status !== WIDGET_STATUSES.DRAFT && status !== WIDGET_STATUSES.ACTIVE) {
     return { error: "Please choose Draft or Active." };
+  }
+
+  if (
+    noticeKind !== NOTICE_KINDS.GENERAL &&
+    noticeKind !== NOTICE_KINDS.DISPATCH
+  ) {
+    return { error: "Please choose a valid Notice kind." };
   }
 
   if (actionType === "update") {
@@ -177,6 +214,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const noticeData = {
     ...targeting.data,
     type: WIDGET_TYPES.NOTICE,
+    noticeKind,
     name,
     status,
     message,
@@ -213,16 +251,61 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function NoticePage() {
-  const { notices, editingNotice, plan } = useLoaderData<typeof loader>();
-
+  const loaderData = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
-  const isEditing = Boolean(editingNotice);
+  const location = useLocation();
+  const currentMutationSignal = getNoticeEditorMutationSignal(location.search);
+  const [lastMutationSignal, setLastMutationSignal] = useState(
+    currentMutationSignal,
+  );
+  const resetSignal = getNoticeEditorMutationSignal(
+    location.search,
+    lastMutationSignal,
+  );
+  const editorResetKey = getNoticeEditorResetKey(
+    loaderData.editingNotice?.id ?? null,
+    resetSignal,
+  );
+
+  useEffect(() => {
+    if (currentMutationSignal) {
+      setLastMutationSignal(currentMutationSignal);
+    }
+  }, [currentMutationSignal]);
+
+  return (
+    <NoticePageContent
+      key={editorResetKey}
+      {...loaderData}
+      actionError={actionData?.error}
+    />
+  );
+}
+
+type NoticePageContentProps = Awaited<ReturnType<typeof loader>> & {
+  actionError?: string;
+};
+
+function NoticePageContent({
+  notices,
+  editingNotice,
+  plan,
+  actionError,
+}: NoticePageContentProps) {
+  const [editorNotice] = useState(editingNotice);
+  const isEditing = Boolean(editorNotice);
+  const [message, setMessage] = useState(editorNotice?.message ?? "");
+  const [noticeKind, setNoticeKind] = useState(
+    editorNotice?.noticeKind === NOTICE_KINDS.DISPATCH
+      ? NOTICE_KINDS.DISPATCH
+      : NOTICE_KINDS.GENERAL,
+  );
 
   return (
     <s-page heading="Notice">
-      {actionData?.error ? (
+      {actionError ? (
         <s-banner tone="critical" heading="Couldn't save notice">
-          {actionData.error}
+          {actionError}
         </s-banner>
       ) : null}
 
@@ -239,14 +322,14 @@ export default function NoticePage() {
               plan === "PRO"
                 ? "Pro plan: unlimited active widgets"
                 : plan === "FREE"
-                  ? "Free plan: one displayed widget per type"
+                  ? "Free plan: one Active Notice total"
                   : "Plan verification unavailable"
             }
           >
             {plan === "PRO"
               ? "You can activate multiple Announcements, Notices, and Countdowns. Notices display together within the Notice app block."
               : plan === "FREE"
-                ? "Free displays up to one eligible Announcement, one eligible Notice, and one eligible Countdown together. Save additional Notices as drafts. To activate a different Notice, first deactivate the other Active Notices."
+                ? "General and Dispatch Notices share the same one-Active-Notice allowance. Save additional Notices as drafts or deactivate the current Active Notice first."
                 : "We could not verify your current plan. Refresh to retry. Draft saves and deletion remain available; additional Active saves require successful server-side plan verification."}
           </s-banner>
 
@@ -257,8 +340,8 @@ export default function NoticePage() {
               value={isEditing ? "update" : "create"}
             />
 
-            {editingNotice ? (
-              <input type="hidden" name="widgetId" value={editingNotice.id} />
+            {editorNotice ? (
+              <input type="hidden" name="widgetId" value={editorNotice.id} />
             ) : null}
 
             <div
@@ -272,18 +355,71 @@ export default function NoticePage() {
                 label="Notice name"
                 name="name"
                 placeholder="Important delivery notice"
-                defaultValue={editingNotice?.name ?? ""}
+                defaultValue={editorNotice?.name ?? ""}
                 required
               />
 
-              <s-text-area
-                label="Notice message"
-                name="message"
-                placeholder="Orders may take an extra day during the holiday period."
-                rows={4}
-                defaultValue={editingNotice?.message ?? ""}
-                required
-              />
+              <label>
+                Notice kind
+                <select
+                  name="noticeKind"
+                  value={noticeKind}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    if (
+                      value === NOTICE_KINDS.GENERAL ||
+                      value === NOTICE_KINDS.DISPATCH
+                    ) {
+                      setNoticeKind(value);
+                    }
+                  }}
+                  style={{
+                    display: "block",
+                    boxSizing: "border-box",
+                    width: "100%",
+                    marginTop: "6px",
+                    padding: "10px",
+                  }}
+                >
+                  <option value={NOTICE_KINDS.GENERAL}>General notice</option>
+                  <option value={NOTICE_KINDS.DISPATCH}>Dispatch notice</option>
+                </select>
+              </label>
+
+              <label>
+                Notice message
+                <textarea
+                  name="message"
+                  placeholder="Orders may take an extra day during the holiday period."
+                  rows={4}
+                  value={message}
+                  onChange={(event) => setMessage(event.currentTarget.value)}
+                  required
+                  style={{
+                    display: "block",
+                    boxSizing: "border-box",
+                    width: "100%",
+                    marginTop: "6px",
+                    padding: "10px",
+                    border: "1px solid #8c9196",
+                    borderRadius: "8px",
+                  }}
+                />
+                {noticeKind === NOTICE_KINDS.DISPATCH ? (
+                  <>
+                    <p style={{ margin: "6px 0" }}>
+                      Dispatch means leaving your business, not arrival at the
+                      customer. Use an estimate; do not promise a delivery date.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setMessage(DISPATCH_EXAMPLE)}
+                    >
+                      Use dispatch example
+                    </button>
+                  </>
+                ) : null}
+              </label>
 
               <div
                 style={{
@@ -296,7 +432,7 @@ export default function NoticePage() {
                   label="Button text, optional"
                   name="buttonText"
                   placeholder="Learn more"
-                  defaultValue={editingNotice?.buttonText ?? ""}
+                  defaultValue={editorNotice?.buttonText ?? ""}
                 />
 
                 <label>
@@ -305,7 +441,7 @@ export default function NoticePage() {
                     name="buttonUrl"
                     type="url"
                     placeholder="https://your-store.com/pages/shipping"
-                    defaultValue={editingNotice?.buttonUrl ?? ""}
+                    defaultValue={editorNotice?.buttonUrl ?? ""}
                     style={{
                       display: "block",
                       boxSizing: "border-box",
@@ -331,7 +467,7 @@ export default function NoticePage() {
                   <input
                     name="backgroundColor"
                     type="color"
-                    defaultValue={editingNotice?.backgroundColor ?? "#FEF3C7"}
+                    defaultValue={editorNotice?.backgroundColor ?? "#FEF3C7"}
                     style={{ display: "block", marginTop: "6px" }}
                   />
                 </label>
@@ -341,7 +477,7 @@ export default function NoticePage() {
                   <input
                     name="textColor"
                     type="color"
-                    defaultValue={editingNotice?.textColor ?? "#111827"}
+                    defaultValue={editorNotice?.textColor ?? "#111827"}
                     style={{ display: "block", marginTop: "6px" }}
                   />
                 </label>
@@ -351,25 +487,24 @@ export default function NoticePage() {
                 name="dismissible"
                 value="on"
                 label="Allow visitors to close the notice"
-                defaultChecked={editingNotice?.dismissible ?? true}
+                defaultChecked={editorNotice?.dismissible ?? true}
               />
               <WidgetTargetingFields
-                key={editingNotice?.id ?? "new-notice"}
                 initialValue={{
                   targetingMode:
-                    editingNotice?.targetingMode === "PRODUCTS"
+                    editorNotice?.targetingMode === "PRODUCTS"
                       ? "PRODUCTS"
-                      : editingNotice?.targetingMode === "COLLECTIONS"
+                      : editorNotice?.targetingMode === "COLLECTIONS"
                         ? "COLLECTIONS"
                         : "ALL",
-                  targetProductIds: editingNotice?.targetProductIds ?? [],
-                  targetCollectionIds: editingNotice?.targetCollectionIds ?? [],
+                  targetProductIds: editorNotice?.targetProductIds ?? [],
+                  targetCollectionIds: editorNotice?.targetCollectionIds ?? [],
                 }}
               />
               <s-select
                 label="Save as"
                 name="status"
-                value={editingNotice?.status ?? "DRAFT"}
+                value={editorNotice?.status ?? "DRAFT"}
               >
                 <s-option value="DRAFT">Draft</s-option>
                 <s-option value="ACTIVE">Active</s-option>
@@ -416,6 +551,11 @@ export default function NoticePage() {
                   }}
                 >
                   <strong>{notice.name}</strong>
+                  <s-badge>
+                    {notice.noticeKind === NOTICE_KINDS.DISPATCH
+                      ? "Dispatch notice"
+                      : "General notice"}
+                  </s-badge>
                   <s-badge
                     color={notice.status === "ACTIVE" ? "strong" : "base"}
                   >
