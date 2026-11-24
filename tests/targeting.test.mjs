@@ -436,9 +436,11 @@ test("multi-batch membership failure leaks no partial matches", async () => {
 });
 
 test("collection membership request timeout is deterministic and cleans timers", async () => {
+  const originalNow = Date.now;
   const originalSetTimeout = globalThis.setTimeout;
   const originalClearTimeout = globalThis.clearTimeout;
   const timers = [];
+  Date.now = () => 1000;
   globalThis.setTimeout = (callback, delay) => {
     const timer = { callback, delay, cleared: false };
     timers.push(timer);
@@ -463,11 +465,12 @@ test("collection membership request timeout is deterministic and cleans timers",
     );
     assert.equal(calls, 1);
     const requestTimers = timers.filter((timer) => timer.delay === 8000);
-    assert.ok(requestTimers.length >= 2);
+    assert.equal(requestTimers.length, 2);
     requestTimers.at(-1).callback();
     assert.equal(await pending, null);
     assert.equal(timers.every((timer) => timer.cleared), true);
   } finally {
+    Date.now = originalNow;
     globalThis.setTimeout = originalSetTimeout;
     globalThis.clearTimeout = originalClearTimeout;
   }
