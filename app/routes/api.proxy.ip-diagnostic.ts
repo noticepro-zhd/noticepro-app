@@ -52,8 +52,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     {
       headerTrust: "unverified",
       countryVerdicts: "unavailable",
+      expectedAddressConfig: {
+        present: config.expectedAddressConfig.present,
+        valid: config.expectedAddressConfig.valid,
+      },
       forwardedFor: inspectForwardedFor(
         request.headers.get("x-forwarded-for"),
+        config.expectedAddressConfig,
       ),
     },
     { headers: responseHeaders },
