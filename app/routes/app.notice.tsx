@@ -34,6 +34,8 @@ import {
   getNoticeEditorResetKey,
 } from "../features/widgets/notice-editor-reset";
 import { readTargetingForm } from "../features/widgets/targeting.shared";
+import { readCountryTargetingForm } from "../features/widgets/country-targeting.shared";
+import WidgetCountryTargetingFields from "../features/widgets/WidgetCountryTargetingFields";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
 
 const DISPATCH_EXAMPLE =
@@ -150,6 +152,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: "Please choose a valid Notice kind." };
   }
 
+  let existingNotice: Awaited<ReturnType<typeof db.widget.findFirst>> = null;
   if (actionType === "update") {
     if (!widgetId) {
       return {
@@ -157,7 +160,7 @@ export async function action({ request }: ActionFunctionArgs) {
       };
     }
 
-    const existingNotice = await db.widget.findFirst({
+    existingNotice = await db.widget.findFirst({
       where: widgetIdScope(session.shop, WIDGET_TYPES.NOTICE, widgetId),
     });
 
@@ -181,6 +184,19 @@ export async function action({ request }: ActionFunctionArgs) {
   if (!targetingVerification.ok) {
     return { error: targetingVerification.error };
   }
+
+  const countryTargeting = readCountryTargetingForm(
+    formData,
+    existingNotice,
+  );
+
+  if (!countryTargeting.ok) {
+    return {
+      error: countryTargeting.error,
+      countryTargetingError: countryTargeting.error,
+    };
+  }
+
   if (status === "ACTIVE") {
     const activeWidgetCount = await db.widget.count({
       where: activeWidgetScope(
@@ -213,6 +229,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const noticeData = {
     ...targeting.data,
+    ...countryTargeting.data,
     type: WIDGET_TYPES.NOTICE,
     noticeKind,
     name,
@@ -278,12 +295,14 @@ export default function NoticePage() {
       key={editorResetKey}
       {...loaderData}
       actionError={actionData?.error}
+      countryTargetingError={actionData?.countryTargetingError}
     />
   );
 }
 
 type NoticePageContentProps = Awaited<ReturnType<typeof loader>> & {
   actionError?: string;
+  countryTargetingError?: string;
 };
 
 function NoticePageContent({
@@ -291,6 +310,7 @@ function NoticePageContent({
   editingNotice,
   plan,
   actionError,
+  countryTargetingError,
 }: NoticePageContentProps) {
   const [editorNotice] = useState(editingNotice);
   const isEditing = Boolean(editorNotice);
@@ -500,6 +520,14 @@ function NoticePageContent({
                   targetProductIds: editorNotice?.targetProductIds ?? [],
                   targetCollectionIds: editorNotice?.targetCollectionIds ?? [],
                 }}
+              />
+              <WidgetCountryTargetingFields
+                initialValue={{
+                  countryTargetingMode:
+                    editorNotice?.countryTargetingMode ?? "ALL",
+                  targetCountryCodes: editorNotice?.targetCountryCodes ?? [],
+                }}
+                error={countryTargetingError}
               />
               <s-select
                 label="Save as"

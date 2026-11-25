@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 import db from "../db.server";
 import {
@@ -13,7 +13,13 @@ import {
   readTargetingContext,
 } from "../features/widgets/targeting.shared";
 import { getCachedMatchingCollectionIds } from "../features/widgets/targeting.server";
-export async function loader({ request }: LoaderFunctionArgs) {
+import {
+  boundCountryAttestationRequest,
+  resolveVisitorCountry,
+} from "../features/widgets/country-resolution.server";
+import { filterByCountryTargeting } from "../features/widgets/country-targeting.server";
+
+async function respond(request: Request) {
   const { session, admin } = await authenticate.public.appProxy(request);
   const headers = { "Cache-Control": "no-store" };
 
@@ -24,6 +30,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
   }
 
+  const countryAssertionRequest = await boundCountryAttestationRequest(
+    request,
+  );
   const now = new Date();
 
   const eligibleAnnouncements = await db.widget.findMany({
@@ -44,6 +53,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       targetingMode: true,
       targetProductIds: true,
       targetCollectionIds: true,
+      countryTargetingMode: true,
+      targetCountryCodes: true,
       id: true,
       message: true,
       buttonText: true,
@@ -75,22 +86,30 @@ export async function loader({ request }: LoaderFunctionArgs) {
     context.collectionIds = matchingCollectionIds ?? [];
   }
 
-  const matchingAnnouncements = eligibleAnnouncements.filter((announcement) => {
-    const mode = announcement.targetingMode;
+  const pageEligibleAnnouncements = eligibleAnnouncements.filter(
+    (announcement) => {
+      const mode = announcement.targetingMode;
 
-    if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
-      return false;
-    }
+      if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
+        return false;
+      }
 
-    return matchesTargeting(
-      {
-        targetingMode: mode,
-        targetProductIds: announcement.targetProductIds,
-        targetCollectionIds: announcement.targetCollectionIds,
-      },
-      context,
-    );
-  });
+      return matchesTargeting(
+        {
+          targetingMode: mode,
+          targetProductIds: announcement.targetProductIds,
+          targetCollectionIds: announcement.targetCollectionIds,
+        },
+        context,
+      );
+    },
+  );
+  const matchingAnnouncements = await filterByCountryTargeting(
+    pageEligibleAnnouncements,
+    countryAssertionRequest,
+    session.shop,
+    resolveVisitorCountry,
+  );
 
   // Keep targeting configuration out of the public response.
   let announcements = matchingAnnouncements.map((announcement) => ({
@@ -104,7 +123,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     dismissible: announcement.dismissible,
   }));
 
-  // Apply the display allowance after page matching.
+  // Apply the display allowance after page and country targeting.
   if (announcements.length > 1) {
     const limit = await getStorefrontWidgetLimit(admin, session.shop);
 
@@ -119,4 +138,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
     multiFormat ? { announcements } : (announcements[0] ?? null),
     { headers },
   );
+}
+
+export function loader({ request }: LoaderFunctionArgs) {
+  return respond(request);
+}
+
+export function action({ request }: ActionFunctionArgs) {
+  return respond(request);
 }

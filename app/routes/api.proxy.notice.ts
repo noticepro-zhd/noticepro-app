@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 import db from "../db.server";
 import {
@@ -13,8 +13,13 @@ import {
   readTargetingContext,
 } from "../features/widgets/targeting.shared";
 import { getCachedMatchingCollectionIds } from "../features/widgets/targeting.server";
+import {
+  boundCountryAttestationRequest,
+  resolveVisitorCountry,
+} from "../features/widgets/country-resolution.server";
+import { filterByCountryTargeting } from "../features/widgets/country-targeting.server";
 
-export async function loader({ request }: LoaderFunctionArgs) {
+async function respond(request: Request) {
   const { session, admin } = await authenticate.public.appProxy(request);
   const headers = { "Cache-Control": "no-store" };
 
@@ -25,6 +30,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
   }
 
+  const countryAssertionRequest = await boundCountryAttestationRequest(
+    request,
+  );
   const now = new Date();
 
   const eligibleNotices = await db.widget.findMany({
@@ -45,6 +53,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       targetingMode: true,
       targetProductIds: true,
       targetCollectionIds: true,
+      countryTargetingMode: true,
+      targetCountryCodes: true,
       id: true,
       message: true,
       buttonText: true,
@@ -74,7 +84,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     context.collectionIds = matchingCollectionIds ?? [];
   }
 
-  const matchingNotices = eligibleNotices.filter((notice) => {
+  const pageEligibleNotices = eligibleNotices.filter((notice) => {
     const mode = notice.targetingMode;
 
     if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
@@ -90,6 +100,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
       context,
     );
   });
+  const matchingNotices = await filterByCountryTargeting(
+    pageEligibleNotices,
+    countryAssertionRequest,
+    session.shop,
+    resolveVisitorCountry,
+  );
 
   // Return public widget content only, not targeting configuration.
   let notices = matchingNotices.map((notice) => ({
@@ -102,7 +118,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     dismissible: notice.dismissible,
   }));
 
-  // Apply the display allowance after page matching.
+  // Apply the display allowance after page and country targeting.
   if (notices.length > 1) {
     const limit = await getStorefrontWidgetLimit(admin, session.shop);
 
@@ -117,4 +133,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return Response.json(multiFormat ? { notices } : (notices[0] ?? null), {
     headers,
   });
+}
+
+export function loader({ request }: LoaderFunctionArgs) {
+  return respond(request);
+}
+
+export function action({ request }: ActionFunctionArgs) {
+  return respond(request);
 }

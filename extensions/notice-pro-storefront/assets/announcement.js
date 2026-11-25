@@ -22,6 +22,92 @@
     }
   };
 
+  async function getCountryAttestation() {
+    const cacheKey = "__noticeproCountryAttestation";
+    const existing = window[cacheKey];
+    if (
+      existing?.pending ||
+      (existing?.expiresAt > Date.now() + 5000 && existing?.promise)
+    ) {
+      return existing.promise;
+    }
+
+    const entry = { pending: true, expiresAt: 0, promise: null };
+    entry.promise = (async () => {
+      const challengeUrl = new URL(
+        "/apps/noticepro/country-challenge",
+        window.location.origin,
+      );
+      const challengeResponse = await fetch(challengeUrl.href, {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      if (!challengeResponse.ok) return null;
+
+      const challengeData = await challengeResponse.json();
+      if (
+        typeof challengeData?.challenge !== "string" ||
+        challengeData.challenge.length > 2048 ||
+        typeof challengeData?.workerUrl !== "string"
+      ) {
+        return null;
+      }
+
+      const workerUrl = new URL(challengeData.workerUrl);
+      if (
+        workerUrl.protocol !== "https:" ||
+        workerUrl.username ||
+        workerUrl.password ||
+        workerUrl.pathname !== "/attest" ||
+        workerUrl.search ||
+        workerUrl.hash
+      ) {
+        return null;
+      }
+
+      const assertionResponse = await fetch(workerUrl.href, {
+        method: "POST",
+        mode: "cors",
+        credentials: "omit",
+        headers: { "Content-Type": "text/plain" },
+        body: challengeData.challenge,
+        cache: "no-store",
+      });
+      if (!assertionResponse.ok || assertionResponse.status === 204) return null;
+
+      const assertionData = await assertionResponse.json();
+      if (
+        typeof assertionData?.assertion !== "string" ||
+        assertionData.assertion.length > 2048 ||
+        !Number.isSafeInteger(assertionData?.expiresAt) ||
+        assertionData.expiresAt * 1000 <= Date.now() + 5000
+      ) {
+        return null;
+      }
+
+      entry.expiresAt = assertionData.expiresAt * 1000;
+      return {
+        challenge: challengeData.challenge,
+        assertion: assertionData.assertion,
+      };
+    })()
+      .then((attestation) => {
+        if (!attestation) entry.expiresAt = Date.now() + 10_000;
+        return attestation;
+      })
+      .catch(() => {
+        entry.expiresAt = Date.now() + 10_000;
+        return null;
+      })
+      .finally(() => {
+        entry.pending = false;
+      });
+
+    window[cacheKey] = entry;
+    return entry.promise;
+  }
+
   const createBar = (announcement) => {
     const storageKey =
       `noticepro-dismissed:${announcement.id}:` +
@@ -116,9 +202,23 @@
       ) {
         endpoint.searchParams.set("np_collection", root.dataset.collectionId);
       }
+      const attestation = await getCountryAttestation();
       const response = await fetch(endpoint.href, {
+        ...(attestation
+          ? {
+              method: "POST",
+              headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(attestation),
+            }
+          : {}),
         credentials: "same-origin",
-        headers: { Accept: "application/json" },
+        ...(!attestation
+          ? { headers: { Accept: "application/json" } }
+          : {}),
+        cache: "no-store",
       });
 
       if (!response.ok) return;

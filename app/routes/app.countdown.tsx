@@ -31,6 +31,12 @@ import {
 
 import WidgetTargetingFields from "../features/widgets/WidgetTargetingFields";
 import { readTargetingForm } from "../features/widgets/targeting.shared";
+import { readCountryTargetingForm } from "../features/widgets/country-targeting.shared";
+import WidgetCountryTargetingFields from "../features/widgets/WidgetCountryTargetingFields";
+import {
+  getWidgetEditorMutationSignal,
+  getWidgetEditorResetKey,
+} from "../features/widgets/widget-editor-reset";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -194,6 +200,19 @@ export async function action({ request }: ActionFunctionArgs) {
   if (!targetingVerification.ok) {
     return { error: targetingVerification.error };
   }
+
+  const countryTargeting = readCountryTargetingForm(
+    formData,
+    existingCountdown,
+  );
+
+  if (!countryTargeting.ok) {
+    return {
+      error: countryTargeting.error,
+      countryTargetingError: countryTargeting.error,
+    };
+  }
+
   if (status === WIDGET_STATUSES.ACTIVE) {
     // Allow an already-active timer to retain its expired state,
     // but do not newly activate a timer whose deadline has passed.
@@ -236,6 +255,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const countdownData = {
     ...targeting.data,
+    ...countryTargeting.data,
     type: WIDGET_TYPES.COUNTDOWN,
     name,
     message,
@@ -303,6 +323,22 @@ export default function CountdownPage() {
 
   const actionData = useActionData<typeof action>();
   const location = useLocation();
+  const currentMutationSignal = getWidgetEditorMutationSignal(
+    location.search,
+    "countdown",
+  );
+  const [lastMutationSignal, setLastMutationSignal] = useState(
+    currentMutationSignal,
+  );
+  const mutationSignal = getWidgetEditorMutationSignal(
+    location.search,
+    "countdown",
+    lastMutationSignal,
+  );
+  const editorResetKey = getWidgetEditorResetKey(
+    editingCountdown?.id ?? null,
+    mutationSignal,
+  );
 
   const [deadlineLocal, setDeadlineLocal] = useState("");
   const [timeZone, setTimeZone] = useState("UTC");
@@ -313,6 +349,12 @@ export default function CountdownPage() {
     : "";
 
   useEffect(() => {
+    if (currentMutationSignal) {
+      setLastMutationSignal(currentMutationSignal);
+    }
+  }, [currentMutationSignal]);
+
+  useEffect(() => {
     setTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
 
     const deadline = storedDeadline
@@ -321,7 +363,7 @@ export default function CountdownPage() {
 
     setDeadlineLocal(toLocalDateInput(deadline));
     setReady(true);
-  }, [storedDeadline, location.key]);
+  }, [storedDeadline, editorResetKey]);
 
   let deadlineISO = "";
 
@@ -366,7 +408,7 @@ export default function CountdownPage() {
 
           <Form
             method="post"
-            key={`${editingCountdown?.id || "new"}:${location.key}`}
+            key={editorResetKey}
           >
             <input
               type="hidden"
@@ -544,7 +586,7 @@ export default function CountdownPage() {
                 />
               </label>
               <WidgetTargetingFields
-                key={`${editingCountdown?.id ?? "new-countdown"}:${location.key}`}
+                key={editorResetKey}
                 initialValue={{
                   targetingMode:
                     editingCountdown?.targetingMode === "PRODUCTS"
@@ -556,6 +598,15 @@ export default function CountdownPage() {
                   targetCollectionIds:
                     editingCountdown?.targetCollectionIds ?? [],
                 }}
+              />
+              <WidgetCountryTargetingFields
+                initialValue={{
+                  countryTargetingMode:
+                    editingCountdown?.countryTargetingMode ?? "ALL",
+                  targetCountryCodes:
+                    editingCountdown?.targetCountryCodes ?? [],
+                }}
+                error={actionData?.countryTargetingError}
               />
               <label>
                 Status

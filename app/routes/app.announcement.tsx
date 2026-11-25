@@ -5,6 +5,7 @@ import {
   useLoaderData,
   useLocation,
 } from "react-router";
+import { useEffect, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import LoadingSubmitButton from "../components/LoadingSubmitButton";
 
@@ -21,6 +22,10 @@ import {
   widgetScope,
 } from "../features/widgets/widget.server";
 import { redirectWithSuccessToast } from "../features/widgets/success-toast.server";
+import {
+  getWidgetEditorMutationSignal,
+  getWidgetEditorResetKey,
+} from "../features/widgets/widget-editor-reset";
 import { getAuthenticatedAppPlan } from "../features/billing/admin-plan.server";
 import {
   canActivateAnotherWidget,
@@ -28,6 +33,8 @@ import {
 } from "../features/billing/plan-policy.server";
 import WidgetTargetingFields from "../features/widgets/WidgetTargetingFields";
 import { readTargetingForm } from "../features/widgets/targeting.shared";
+import { readCountryTargetingForm } from "../features/widgets/country-targeting.shared";
+import WidgetCountryTargetingFields from "../features/widgets/WidgetCountryTargetingFields";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
 function toDateTimeLocal(value: Date | null | undefined) {
   if (!value) return "";
@@ -172,6 +179,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: "Please choose Draft or Active." };
   }
 
+  let existingWidget: Awaited<ReturnType<typeof db.widget.findFirst>> = null;
   if (actionType === "update") {
     if (!widgetId) {
       return {
@@ -179,7 +187,7 @@ export async function action({ request }: ActionFunctionArgs) {
       };
     }
 
-    const existingWidget = await db.widget.findFirst({
+    existingWidget = await db.widget.findFirst({
       where: widgetIdScope(session.shop, WIDGET_TYPES.ANNOUNCEMENT, widgetId),
     });
 
@@ -203,6 +211,19 @@ export async function action({ request }: ActionFunctionArgs) {
   if (!targetingVerification.ok) {
     return { error: targetingVerification.error };
   }
+
+  const countryTargeting = readCountryTargetingForm(
+    formData,
+    existingWidget,
+  );
+
+  if (!countryTargeting.ok) {
+    return {
+      error: countryTargeting.error,
+      countryTargetingError: countryTargeting.error,
+    };
+  }
+
   if (status === WIDGET_STATUSES.ACTIVE) {
     const activeWidgetCount = await db.widget.count({
       where: activeWidgetScope(
@@ -237,6 +258,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const widgetData = {
     ...targeting.data,
+    ...countryTargeting.data,
     type: WIDGET_TYPES.ANNOUNCEMENT,
     name,
     status,
@@ -280,7 +302,29 @@ export default function AppHome() {
 
   const actionData = useActionData<typeof action>();
   const location = useLocation();
+  const currentMutationSignal = getWidgetEditorMutationSignal(
+    location.search,
+    "announcement",
+  );
+  const [lastMutationSignal, setLastMutationSignal] = useState(
+    currentMutationSignal,
+  );
+  const mutationSignal = getWidgetEditorMutationSignal(
+    location.search,
+    "announcement",
+    lastMutationSignal,
+  );
+  const editorResetKey = getWidgetEditorResetKey(
+    editingWidget?.id ?? null,
+    mutationSignal,
+  );
   const isEditing = Boolean(editingWidget);
+
+  useEffect(() => {
+    if (currentMutationSignal) {
+      setLastMutationSignal(currentMutationSignal);
+    }
+  }, [currentMutationSignal]);
 
   return (
     <s-page heading="Announcement">
@@ -320,7 +364,7 @@ export default function AppHome() {
 
           <Form
             method="post"
-            key={`${editingWidget?.id ?? "new-announcement"}:${location.key}`}
+            key={editorResetKey}
           >
             <input
               type="hidden"
@@ -444,6 +488,14 @@ export default function AppHome() {
                   targetProductIds: editingWidget?.targetProductIds ?? [],
                   targetCollectionIds: editingWidget?.targetCollectionIds ?? [],
                 }}
+              />
+              <WidgetCountryTargetingFields
+                initialValue={{
+                  countryTargetingMode:
+                    editingWidget?.countryTargetingMode ?? "ALL",
+                  targetCountryCodes: editingWidget?.targetCountryCodes ?? [],
+                }}
+                error={actionData?.countryTargetingError}
               />
               <s-select
                 label="Save as"

@@ -1,0 +1,3 @@
+ALTER TABLE "Widget"
+ADD COLUMN "countryTargetingMode" TEXT NOT NULL DEFAULT 'ALL',
+ADD COLUMN "targetCountryCodes" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];

@@ -1,0 +1,8 @@
+name = "noticepro-country-attestation"
+main = "src/index.js"
+compatibility_date = "2026-11-25"
+workers_dev = true
+send_metrics = false
+
+[observability]
+enabled = false

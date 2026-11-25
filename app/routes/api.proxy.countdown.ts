@@ -1,4 +1,4 @@
-import type { LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 
 import db from "../db.server";
 import { authenticate } from "../shopify.server";
@@ -14,8 +14,13 @@ import {
   readTargetingContext,
 } from "../features/widgets/targeting.shared";
 import { getCachedMatchingCollectionIds } from "../features/widgets/targeting.server";
+import {
+  boundCountryAttestationRequest,
+  resolveVisitorCountry,
+} from "../features/widgets/country-resolution.server";
+import { filterByCountryTargeting } from "../features/widgets/country-targeting.server";
 
-export async function loader({ request }: LoaderFunctionArgs) {
+async function respond(request: Request) {
   const { session, admin } = await authenticate.public.appProxy(request);
   const headers = { "Cache-Control": "no-store" };
 
@@ -26,6 +31,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     );
   }
 
+  const countryAssertionRequest = await boundCountryAttestationRequest(
+    request,
+  );
   const now = new Date();
 
   const eligibleCountdowns = await db.widget.findMany({
@@ -47,6 +55,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
       targetingMode: true,
       targetProductIds: true,
       targetCollectionIds: true,
+      countryTargetingMode: true,
+      targetCountryCodes: true,
       id: true,
       message: true,
       backgroundColor: true,
@@ -79,7 +89,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     context.collectionIds = matchingCollectionIds ?? [];
   }
 
-  const matchingCountdowns = eligibleCountdowns.filter((countdown) => {
+  const pageEligibleCountdowns = eligibleCountdowns.filter((countdown) => {
     const mode = countdown.targetingMode;
 
     if (mode !== "ALL" && mode !== "PRODUCTS" && mode !== "COLLECTIONS") {
@@ -95,6 +105,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
       context,
     );
   });
+  const matchingCountdowns = await filterByCountryTargeting(
+    pageEligibleCountdowns,
+    countryAssertionRequest,
+    session.shop,
+    resolveVisitorCountry,
+  );
 
   // Keep targeting configuration out of the public response.
   let countdowns = matchingCountdowns.map((countdown) => ({
@@ -110,7 +126,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     countdownExpiredText: countdown.countdownExpiredText,
   }));
 
-  // Apply the display allowance after page matching.
+  // Apply the display allowance after page and country targeting.
   if (countdowns.length > 1) {
     const limit = await getStorefrontWidgetLimit(admin, session.shop);
 
@@ -130,4 +146,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
       : { countdown: countdowns[0] ?? null, serverNow },
     { headers },
   );
+}
+
+export function loader({ request }: LoaderFunctionArgs) {
+  return respond(request);
+}
+
+export function action({ request }: ActionFunctionArgs) {
+  return respond(request);
 }

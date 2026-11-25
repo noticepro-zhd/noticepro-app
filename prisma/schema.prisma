@@ -59,6 +59,8 @@ model Widget {
   targetingMode          String    @default("ALL")
   targetProductIds       String[]  @default([])
   targetCollectionIds    String[]  @default([])
+  countryTargetingMode   String    @default("ALL")
+  targetCountryCodes     String[]  @default([])
   countdownEndsAt        DateTime?
   countdownTimeZone      String    @default("UTC")
   countdownShowDays      Boolean   @default(false)

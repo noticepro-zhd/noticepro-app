@@ -10,9 +10,24 @@ import {
   readTargetingForm,
 } from "../app/features/widgets/targeting.shared.ts";
 import {
+  COUNTRY_TARGETING_MODES,
+  readCountryTargetingForm,
+} from "../app/features/widgets/country-targeting.shared.ts";
+import { filterByCountryTargeting } from "../app/features/widgets/country-targeting.server.ts";
+import {
+  boundCountryAttestationRequest,
+  resolveVisitorCountry,
+} from "../app/features/widgets/country-resolution.server.ts";
+import { issueCountryChallenge } from "../app/features/widgets/country-attestation.server.ts";
+import { createCountryAttestationWorker } from "../country-attestation-worker/src/index.js";
+import {
   getNoticeEditorMutationSignal,
   getNoticeEditorResetKey,
 } from "../app/features/widgets/notice-editor-reset.ts";
+import {
+  getWidgetEditorMutationSignal,
+  getWidgetEditorResetKey,
+} from "../app/features/widgets/widget-editor-reset.ts";
 import { redirectWithSuccessToast } from "../app/features/widgets/success-toast.server.ts";
 import { activeWidgetLimitForPlan, canActivateAnotherWidget } from "../app/features/billing/plan-policy.server.ts";
 
@@ -61,6 +76,16 @@ function loadActualRoute(relativePath, mocks) {
         jsx: () => null,
         jsxs: () => null,
         Fragment: Symbol("Fragment"),
+      };
+    }
+    if (specifier === "../features/widgets/country-targeting.server") {
+      return mocks[specifier] ?? { filterByCountryTargeting };
+    }
+    if (specifier === "../features/widgets/country-resolution.server") {
+      return {
+        boundCountryAttestationRequest,
+        resolveVisitorCountry,
+        ...mocks[specifier],
       };
     }
     if (Object.prototype.hasOwnProperty.call(mocks, specifier)) {
@@ -146,15 +171,23 @@ function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = 
       readTargetingContext,
       readTargetingForm,
     },
+    "../features/widgets/country-targeting.shared": {
+      readCountryTargetingForm,
+    },
     "../features/widgets/targeting.server": {
       verifyTargetingSelection: async () => state.verification,
     },
     "../components/LoadingSubmitButton": { __esModule: true, default: () => null },
     "../features/widgets/WidgetTargetingFields": { __esModule: true, default: () => null },
+    "../features/widgets/WidgetCountryTargetingFields": { __esModule: true, default: () => null },
     "../features/widgets/CountdownPreview": { __esModule: true, default: () => null },
     "../features/widgets/notice-editor-reset": {
       getNoticeEditorMutationSignal,
       getNoticeEditorResetKey,
+    },
+    "../features/widgets/widget-editor-reset": {
+      getWidgetEditorMutationSignal,
+      getWidgetEditorResetKey,
     },
   };
   state.verifiedTargeting = [];
@@ -179,6 +212,70 @@ async function actionRequest(entries, url = "https://shop.test/app/test") {
     body: data,
   });
 }
+
+test("country challenge route requires app-proxy auth and exposes no signing secret", async () => {
+  const secret = "server-only-attestation-secret";
+  let issuedFor = null;
+  const mocks = {
+    "../shopify.server": {
+      authenticate: {
+        public: {
+          appProxy: async () => ({
+            session: { shop: "noticepro-test.myshopify.com" },
+            admin: {},
+          }),
+        },
+      },
+    },
+    "../features/widgets/country-attestation.server": {
+      readCountryAttestationConfiguration: () => ({
+        enabled: true,
+        secret,
+        workerUrl: "https://worker.test/attest",
+      }),
+      issueCountryChallenge: (shop, receivedSecret) => {
+        issuedFor = shop;
+        assert.equal(receivedSecret, secret);
+        return "signed-challenge";
+      },
+    },
+  };
+  const route = loadActualRoute(
+    "../app/routes/api.proxy.country-challenge.ts",
+    mocks,
+  );
+  const response = await route.loader({
+    request: new Request("https://storefront.test/apps/noticepro/country-challenge"),
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(issuedFor, "noticepro-test.myshopify.com");
+  assert.deepEqual(body, {
+    challenge: "signed-challenge",
+    workerUrl: "https://worker.test/attest",
+  });
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+  assert.doesNotMatch(JSON.stringify(body), new RegExp(secret));
+
+  const unauthorizedRoute = loadActualRoute(
+    "../app/routes/api.proxy.country-challenge.ts",
+    {
+      ...mocks,
+      "../shopify.server": {
+        authenticate: {
+          public: {
+            appProxy: async () => ({ session: null, admin: null }),
+          },
+        },
+      },
+    },
+  );
+  const unauthorized = await unauthorizedRoute.loader({
+    request: new Request("https://origin.test/api/proxy/country-challenge"),
+  });
+  assert.equal(unauthorized.status, 401);
+});
 
 test("actual admin routes scope create/update, clear selections, and reject invalid writes", async () => {
   for (const [path, type, required] of [
@@ -523,6 +620,8 @@ test("Dispatch storefront output reuses Notice targeting, keeps its proxy shape,
         targetingMode: "PRODUCTS",
         targetProductIds: [productId],
         targetCollectionIds: [],
+        countryTargetingMode: "ALL",
+        targetCountryCodes: [],
         message: unsafeLookingMessage,
         buttonText: null,
         buttonUrl: null,
@@ -536,6 +635,8 @@ test("Dispatch storefront output reuses Notice targeting, keeps its proxy shape,
         targetingMode: "COLLECTIONS",
         targetProductIds: [],
         targetCollectionIds: [collectionId],
+        countryTargetingMode: "ALL",
+        targetCountryCodes: [],
         message: "Dispatch estimate for this collection",
         buttonText: null,
         buttonUrl: null,
@@ -978,6 +1079,390 @@ test("actual countdown checkbox contract persists checked and unchecked create/u
   assert.equal(updatedData.countdownShowDays, false);
 });
 
+test("actual Announcement, Notice, and Countdown actions persist and validate country settings", async () => {
+  const routes = [
+    ["../app/routes/app.announcement.tsx", "ANNOUNCEMENT"],
+    ["../app/routes/app.notice.tsx", "NOTICE"],
+    ["../app/routes/app.countdown.tsx", "COUNTDOWN"],
+  ];
+
+  for (const [path, type] of routes) {
+    const db = makeDb();
+    const created = [];
+    const updates = [];
+    const scopes = [];
+    let existing = {
+      id: "widget-1",
+      status: "DRAFT",
+      countryTargetingMode: "SELECTED",
+      targetCountryCodes: ["GB"],
+    };
+    db.widget.create = async (args) => {
+      created.push(args.data);
+      return args;
+    };
+    db.widget.findFirst = async ({ where }) => {
+      scopes.push(where);
+      return existing;
+    };
+    db.widget.updateMany = async (args) => {
+      updates.push(args);
+      return { count: 1 };
+    };
+
+    const { mocks, state } = makeAdminMocks({
+      db,
+      shop: "editor.test",
+      plan: "FREE",
+    });
+    const route = loadActualRoute(path, mocks);
+
+    function entries({
+      action = "create",
+      status = "DRAFT",
+      mode = "ALL",
+      codes = [],
+      includeCountryFields = true,
+      noticeKind = "GENERAL",
+    } = {}) {
+      const values = {
+        _action: action,
+        ...(action === "update" ? { widgetId: "widget-1" } : {}),
+        name: "Country rules",
+        message: "Merchant-written message",
+        status,
+        targetingMode: "ALL",
+        targetProductIds: "[]",
+        targetCollectionIds: "[]",
+        backgroundColor: "#111111",
+        textColor: "#FFFFFF",
+      };
+      if (type === "NOTICE") values.noticeKind = noticeKind;
+      if (type === "COUNTDOWN") {
+        Object.assign(values, {
+          countdownEndsAt: "2099-01-01T00:00:00.000Z",
+          countdownTimeZone: "UTC",
+          countdownDesktopOffset: "0",
+          countdownMobileOffset: "0",
+        });
+      }
+      if (includeCountryFields) {
+        values.countryTargetingMode = mode;
+        values.targetCountryCodes = JSON.stringify(codes);
+      }
+      return values;
+    }
+
+    const draftResult = await route.action({
+      request: await actionRequest(entries()),
+    });
+    assert.ok(draftResult.redirect, `${type} draft create`);
+    assert.equal(created[0].status, "DRAFT");
+    assert.equal(created[0].countryTargetingMode, "ALL");
+    assert.deepEqual(created[0].targetCountryCodes, []);
+
+    const activeResult = await route.action({
+      request: await actionRequest(
+        entries({
+          status: "ACTIVE",
+          mode: "SELECTED",
+          codes: ["CA", "US"],
+          noticeKind: "DISPATCH",
+        }),
+      ),
+    });
+    assert.ok(activeResult.redirect, `${type} first Active create`);
+    assert.equal(created[1].status, "ACTIVE");
+    assert.equal(created[1].countryTargetingMode, "SELECTED");
+    assert.deepEqual(created[1].targetCountryCodes, ["CA", "US"]);
+
+    const updateResult = await route.action({
+      request: await actionRequest(
+        entries({
+          action: "update",
+          mode: "SELECTED",
+          codes: ["JP"],
+          noticeKind: "DISPATCH",
+        }),
+      ),
+    });
+    assert.ok(updateResult.redirect, `${type} update`);
+    assert.equal(updates[0].data.countryTargetingMode, "SELECTED");
+    assert.deepEqual(updates[0].data.targetCountryCodes, ["JP"]);
+
+    existing = {
+      ...existing,
+      countryTargetingMode: "SELECTED",
+      targetCountryCodes: ["GB", "CA"],
+    };
+    const legacyUpdate = await route.action({
+      request: await actionRequest(
+        entries({ action: "update", includeCountryFields: false }),
+      ),
+    });
+    assert.ok(legacyUpdate.redirect, `${type} legacy update`);
+    assert.equal(updates[1].data.countryTargetingMode, "SELECTED");
+    assert.deepEqual(updates[1].data.targetCountryCodes, ["GB", "CA"]);
+
+    const writesBeforeInvalid = created.length + updates.length;
+    const invalidSelection = await route.action({
+      request: await actionRequest(
+        entries({
+          mode: "SELECTED",
+          codes: [],
+        }),
+      ),
+    });
+    assert.match(invalidSelection.error, /Select at least one country/);
+    assert.equal(invalidSelection.countryTargetingError, invalidSelection.error);
+    assert.equal(created.length + updates.length, writesBeforeInvalid);
+
+    db.widget.count = async () => 1;
+    const blockedAdditionalActive = await route.action({
+      request: await actionRequest(
+        entries({
+          status: "ACTIVE",
+          mode: "SELECTED",
+          codes: ["US"],
+        }),
+      ),
+    });
+    assert.match(blockedAdditionalActive.error, /Free plan allows one active/i);
+    assert.equal(state.planCalls, 1);
+    assert.equal(created.length + updates.length, writesBeforeInvalid);
+
+    state.plan = "PRO";
+    assert.ok(
+      (
+        await route.action({
+          request: await actionRequest(
+            entries({
+              status: "ACTIVE",
+              mode: "SELECTED",
+              codes: ["US"],
+            }),
+          ),
+        })
+      ).redirect,
+    );
+    assert.deepEqual(created.at(-1).targetCountryCodes, ["US"]);
+
+    state.planError = new Error("billing unavailable");
+    const billingFailure = await route.action({
+      request: await actionRequest(
+        entries({
+          status: "ACTIVE",
+          mode: "SELECTED",
+          codes: ["US"],
+        }),
+      ),
+    });
+    assert.match(billingFailure.error, /could not verify your plan/i);
+
+    existing = null;
+    const writesBeforeForeignUpdate = created.length + updates.length;
+    const foreignUpdate = await route.action({
+      request: await actionRequest(
+        entries({
+          action: "update",
+          mode: "SELECTED",
+          codes: ["US"],
+        }),
+      ),
+    });
+    assert.match(foreignUpdate.error, /could not be found/i);
+    assert.deepEqual(scopes.at(-1), {
+      shopDomain: "editor.test",
+      type,
+      id: "widget-1",
+    });
+    assert.equal(created.length + updates.length, writesBeforeForeignUpdate);
+
+    existing = {
+      id: "widget-1",
+      status: "DRAFT",
+      countryTargetingMode: "SELECTED",
+      targetCountryCodes: ["GB"],
+    };
+    db.widget.updateMany = async (args) => {
+      updates.push(args);
+      return { count: 0 };
+    };
+    const zeroCountUpdate = await route.action({
+      request: await actionRequest(
+        entries({
+          action: "update",
+          mode: "SELECTED",
+          codes: ["US"],
+        }),
+      ),
+    });
+    assert.match(zeroCountUpdate.error, /could not be found/i);
+  }
+});
+
+test("actual Announcement, Notice, and Countdown actions reject incomplete country fields on create and update", async () => {
+  const routes = [
+    ["../app/routes/app.announcement.tsx", "ANNOUNCEMENT"],
+    ["../app/routes/app.notice.tsx", "NOTICE"],
+    ["../app/routes/app.countdown.tsx", "COUNTDOWN"],
+  ];
+  const incompleteCountryFields = [
+    {
+      description: "mode without country list",
+      countryFields: { countryTargetingMode: "SELECTED" },
+    },
+    {
+      description: "country list without mode",
+      countryFields: { targetCountryCodes: JSON.stringify(["US"]) },
+    },
+  ];
+
+  for (const [path, type] of routes) {
+    const db = makeDb();
+    const existing = {
+      id: "widget-1",
+      shopDomain: "editor.test",
+      type,
+      status: "DRAFT",
+      countryTargetingMode: "SELECTED",
+      targetCountryCodes: ["GB", "CA"],
+    };
+    const created = [];
+    const updates = [];
+
+    db.widget.findFirst = async ({ where }) => {
+      assert.deepEqual(where, {
+        shopDomain: "editor.test",
+        type,
+        id: "widget-1",
+      });
+      return existing;
+    };
+    db.widget.create = async (args) => {
+      created.push(args);
+      return args;
+    };
+    db.widget.updateMany = async (args) => {
+      updates.push(args);
+      Object.assign(existing, args.data);
+      return { count: 1 };
+    };
+
+    const { mocks } = makeAdminMocks({ db, shop: "editor.test" });
+    const route = loadActualRoute(path, mocks);
+
+    for (const action of ["create", "update"]) {
+      for (const { description, countryFields } of incompleteCountryFields) {
+        const values = {
+          _action: action,
+          ...(action === "update" ? { widgetId: existing.id } : {}),
+          name: "Country rules",
+          message: "Merchant-written message",
+          status: "DRAFT",
+          targetingMode: "ALL",
+          targetProductIds: "[]",
+          targetCollectionIds: "[]",
+          backgroundColor: "#111111",
+          textColor: "#FFFFFF",
+          ...countryFields,
+        };
+        if (type === "NOTICE") values.noticeKind = "GENERAL";
+        if (type === "COUNTDOWN") {
+          Object.assign(values, {
+            countdownEndsAt: "2099-01-01T00:00:00.000Z",
+            countdownTimeZone: "UTC",
+            countdownDesktopOffset: "0",
+            countdownMobileOffset: "0",
+          });
+        }
+
+        const result = await route.action({
+          request: await actionRequest(values),
+        });
+
+        assert.equal(
+          result.countryTargetingError,
+          "The country selection is incomplete.",
+          `${type} ${action}: ${description}`,
+        );
+        assert.equal(result.error, result.countryTargetingError);
+        assert.equal(created.length, 0, `${type} ${action}: create writes`);
+        assert.equal(updates.length, 0, `${type} ${action}: update writes`);
+        assert.equal(existing.countryTargetingMode, "SELECTED");
+        assert.deepEqual(existing.targetCountryCodes, ["GB", "CA"]);
+      }
+    }
+  }
+});
+
+test("Announcement and Countdown editor identities preserve errors and reset on successful mutations", () => {
+  const routes = [
+    {
+      solution: "announcement",
+      source: fs.readFileSync(
+        new URL("../app/routes/app.announcement.tsx", import.meta.url),
+        "utf8",
+      ),
+    },
+    {
+      solution: "countdown",
+      source: fs.readFileSync(
+        new URL("../app/routes/app.countdown.tsx", import.meta.url),
+        "utf8",
+      ),
+    },
+  ];
+
+  for (const { solution, source } of routes) {
+    const createSearch =
+      `?noticeproToast=${solution}.created&noticeproToastId=create-1`;
+    const initialKey = getWidgetEditorResetKey(null, null);
+    const createSignal = getWidgetEditorMutationSignal(
+      createSearch,
+      solution,
+    );
+    const successfulCreateKey = getWidgetEditorResetKey(null, createSignal);
+
+    assert.notEqual(successfulCreateKey, initialKey, `${solution} fresh create`);
+    assert.equal(
+      getWidgetEditorMutationSignal("", solution, createSignal),
+      createSignal,
+      `${solution} keeps reset identity after toast query cleanup`,
+    );
+    assert.equal(
+      getWidgetEditorResetKey(
+        null,
+        getWidgetEditorMutationSignal("", solution, createSignal),
+      ),
+      successfulCreateKey,
+      `${solution} error/revalidation identity stays stable`,
+    );
+
+    const updateSignal = getWidgetEditorMutationSignal(
+      `?noticeproToast=${solution}.updated&noticeproToastId=update-1`,
+      solution,
+    );
+    assert.notEqual(
+      getWidgetEditorResetKey("widget-a", updateSignal),
+      getWidgetEditorResetKey("widget-a", createSignal),
+      `${solution} successful update resets`,
+    );
+    assert.notEqual(
+      getWidgetEditorResetKey("widget-a", createSignal),
+      getWidgetEditorResetKey("widget-b", createSignal),
+      `${solution} edit destination changes reset identity`,
+    );
+    assert.match(source, /key=\{editorResetKey\}/);
+    assert.doesNotMatch(source, /key=\{`\$\{editing(?:Widget|Countdown).+location\.key/);
+  }
+
+  const countdownSource = routes.find(
+    ({ solution }) => solution === "countdown",
+  ).source;
+  assert.match(countdownSource, /\}, \[storedDeadline, editorResetKey\]\)/);
+});
+
 test("actual admin routes reject verification/status/action failures and zero-count delete/update", async () => {
   for (const [path, type] of [
     ["../app/routes/app.announcement.tsx", "ANNOUNCEMENT"],
@@ -1081,6 +1566,8 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
           targetingMode: "ALL",
           targetProductIds: [],
           targetCollectionIds: [],
+          countryTargetingMode: "ALL",
+          targetCountryCodes: [],
           message: "all",
           buttonText: null,
           buttonUrl: null,
@@ -1100,6 +1587,8 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
           targetingMode: "PRODUCTS",
           targetProductIds: ["gid://shopify/Product/101"],
           targetCollectionIds: [],
+          countryTargetingMode: "ALL",
+          targetCountryCodes: [],
           message: "product",
           buttonText: null,
           buttonUrl: null,
@@ -1119,6 +1608,8 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
           targetingMode: "COLLECTIONS",
           targetProductIds: [],
           targetCollectionIds: ["gid://shopify/Collection/201"],
+          countryTargetingMode: "ALL",
+          targetCountryCodes: [],
           message: "collection",
           buttonText: null,
           buttonUrl: null,
@@ -1175,6 +1666,8 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
     const body = await result.json();
 
     assert.equal(findArgs.where.type, type);
+    assert.equal(findArgs.where.shopDomain, "shop.test");
+    assert.equal(findArgs.where.status, "ACTIVE");
     assert.equal(findArgs.orderBy[0].createdAt, "asc");
     assert.equal(findArgs.orderBy[1].id, "asc");
     assert.ok(findArgs.where.AND);
@@ -1188,6 +1681,614 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
     if (type === "COUNTDOWN") {
       assert.ok(body.serverNow);
       assert.equal(typeof body.serverNow, "string");
+    }
+  }
+});
+
+test("actual proxy loaders match countries after page/schedule targeting and before the cap", async () => {
+  const cases = [
+    ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements"],
+    ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices"],
+    ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns"],
+  ];
+
+  function widget({
+    id,
+    status = "ACTIVE",
+    targetingMode = "ALL",
+    targetProductIds = [],
+    targetCollectionIds = [],
+    countryTargetingMode = COUNTRY_TARGETING_MODES.ALL,
+    targetCountryCodes = [],
+  }) {
+    return {
+      id,
+      status,
+      targetingMode,
+      targetProductIds,
+      targetCollectionIds,
+      countryTargetingMode,
+      targetCountryCodes,
+      message: id,
+      buttonText: null,
+      buttonUrl: null,
+      position: "TOP",
+      backgroundColor: "#111111",
+      textColor: "#FFFFFF",
+      dismissible: true,
+      countdownEndsAt: "2099-01-01T00:00:00.000Z",
+      countdownShowDays: true,
+      countdownSticky: false,
+      countdownDesktopOffset: 0,
+      countdownMobileOffset: 0,
+      countdownExpiredText: "Expired",
+    };
+  }
+
+  for (const [path, type, plural] of cases) {
+    const rows = [
+      widget({
+        id: "selected-us",
+        targetingMode: "PRODUCTS",
+        targetProductIds: ["gid://shopify/Product/101"],
+        countryTargetingMode: COUNTRY_TARGETING_MODES.SELECTED,
+        targetCountryCodes: ["US"],
+      }),
+      widget({ id: "all" }),
+      widget({
+        id: "selected-collection-gb",
+        targetingMode: "COLLECTIONS",
+        targetCollectionIds: ["gid://shopify/Collection/201"],
+        countryTargetingMode: COUNTRY_TARGETING_MODES.SELECTED,
+        targetCountryCodes: ["GB"],
+      }),
+      widget({
+        id: "page-mismatch",
+        targetingMode: "PRODUCTS",
+        targetProductIds: ["gid://shopify/Product/999"],
+        countryTargetingMode: COUNTRY_TARGETING_MODES.SELECTED,
+        targetCountryCodes: ["GB"],
+      }),
+      widget({ id: "draft", status: "DRAFT" }),
+    ];
+    const db = makeDb();
+    let findArgs;
+    db.widget.findMany = async (args) => {
+      findArgs = args;
+      return rows.filter((row) => row.status === args.where.status);
+    };
+
+    let resolverCalls = 0;
+    let collectionCalls = 0;
+    const mocks = {
+      "../shopify.server": {
+        authenticate: {
+          public: {
+            appProxy: async () => ({ session: { shop: "proxy.test" }, admin: {} }),
+          },
+        },
+      },
+      "../db.server": { __esModule: true, default: db },
+      "../features/widgets/widget.constants": {
+        WIDGET_STATUSES: { ACTIVE: "ACTIVE", DRAFT: "DRAFT" },
+        WIDGET_TYPES: {
+          ANNOUNCEMENT: "ANNOUNCEMENT",
+          NOTICE: "NOTICE",
+          COUNTDOWN: "COUNTDOWN",
+        },
+      },
+      "../features/widgets/widget.server": {
+        widgetScope: (shop, widgetType) => ({ shopDomain: shop, type: widgetType }),
+      },
+      "../features/billing/storefront-plan.server": {
+        getStorefrontWidgetLimit: async () => 2,
+      },
+      "../features/widgets/targeting.shared": {
+        __esModule: true,
+        matchesTargeting,
+        readTargetingContext,
+        readTargetingForm,
+      },
+      "../features/widgets/targeting.server": {
+        getCachedMatchingCollectionIds: async (_shop, _admin, _product, ids) => {
+          collectionCalls += 1;
+          return ids.length ? ["gid://shopify/Collection/201"] : [];
+        },
+      },
+      "../features/widgets/country-targeting.server": {
+        filterByCountryTargeting,
+      },
+      "../features/widgets/country-resolution.server": {
+        resolveVisitorCountry: async () => {
+          resolverCalls += 1;
+          return "GB";
+        },
+      },
+    };
+    const route = loadActualRoute(path, mocks);
+    const baseUrl =
+      "https://shop.test/apps/notice-pro?np_page=product&np_product=101";
+    const multiResponse = await route.loader({
+      request: new Request(`${baseUrl}&format=multi`),
+    });
+    const body = await multiResponse.json();
+
+    assert.equal(findArgs.where.shopDomain, "proxy.test");
+    assert.equal(findArgs.where.type, type);
+    assert.equal(findArgs.where.status, "ACTIVE");
+    assert.equal(findArgs.orderBy[0].createdAt, "asc");
+    assert.equal(findArgs.orderBy[1].id, "asc");
+    assert.equal(findArgs.where.AND.length, 2);
+    assert.equal(findArgs.where.AND[0].OR[0].startsAt, null);
+    assert.ok(findArgs.where.AND[0].OR[1].startsAt.lte instanceof Date);
+    assert.equal(findArgs.where.AND[1].OR[0].endsAt, null);
+    assert.ok(findArgs.where.AND[1].OR[1].endsAt.gte instanceof Date);
+    if (type === "COUNTDOWN") {
+      assert.equal(findArgs.where.countdownEndsAt.not, null);
+      assert.deepEqual(Object.keys(body).sort(), ["countdowns", "serverNow"]);
+    } else {
+      assert.deepEqual(Object.keys(body), [plural]);
+    }
+
+    assert.equal(multiResponse.headers.get("Cache-Control"), "no-store");
+    assert.equal(collectionCalls, 1);
+    assert.equal(resolverCalls, 1);
+    assert.deepEqual(
+      body[plural].map((item) => item.message),
+      ["all", "selected-collection-gb"],
+    );
+    for (const item of body[plural]) {
+      for (const privateField of [
+        "countryTargetingMode",
+        "targetCountryCodes",
+        "country",
+        "countryCode",
+        "visitorIp",
+        "ip",
+      ]) {
+        assert.equal(Object.hasOwn(item, privateField), false);
+      }
+    }
+    assert.doesNotMatch(
+      JSON.stringify(body),
+      /countryTargetingMode|targetCountryCodes|visitorIp|resolvedCountry/i,
+    );
+
+    const singleResponse = await route.loader({
+      request: new Request(baseUrl),
+    });
+    const singleBody = await singleResponse.json();
+    assert.equal(singleResponse.headers.get("Cache-Control"), "no-store");
+    assert.equal(resolverCalls, 2);
+    if (type === "COUNTDOWN") {
+      assert.deepEqual(Object.keys(singleBody).sort(), ["countdown", "serverNow"]);
+      assert.equal(singleBody.countdown.message, "all");
+    } else {
+      assert.equal(singleBody.message, "all");
+      assert.equal("announcements" in singleBody, false);
+      assert.equal("notices" in singleBody, false);
+    }
+  }
+});
+
+test("actual proxy loaders keep ALL on unknown or failed resolution and fail SELECTED closed", async () => {
+  const cases = [
+    ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements"],
+    ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices"],
+    ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns"],
+  ];
+
+  for (const [path, type, plural] of cases) {
+    for (const outcome of ["unknown", "rejected"]) {
+      const db = makeDb();
+      db.widget.findMany = async () => [
+        {
+          id: "all",
+          targetingMode: "ALL",
+          targetProductIds: [],
+          targetCollectionIds: [],
+          countryTargetingMode: COUNTRY_TARGETING_MODES.ALL,
+          targetCountryCodes: [],
+          message: "all",
+          backgroundColor: "#111111",
+          textColor: "#FFFFFF",
+          dismissible: true,
+          countdownEndsAt: "2099-01-01T00:00:00.000Z",
+          countdownShowDays: false,
+          countdownSticky: false,
+          countdownDesktopOffset: 0,
+          countdownMobileOffset: 0,
+          countdownExpiredText: "Expired",
+        },
+        {
+          id: "selected",
+          targetingMode: "ALL",
+          targetProductIds: [],
+          targetCollectionIds: [],
+          countryTargetingMode: COUNTRY_TARGETING_MODES.SELECTED,
+          targetCountryCodes: ["US"],
+          message: "selected",
+          backgroundColor: "#222222",
+          textColor: "#FFFFFF",
+          dismissible: true,
+          countdownEndsAt: "2099-01-01T00:00:00.000Z",
+          countdownShowDays: false,
+          countdownSticky: false,
+          countdownDesktopOffset: 0,
+          countdownMobileOffset: 0,
+          countdownExpiredText: "Expired",
+        },
+      ];
+
+      let resolverCalls = 0;
+      const mocks = {
+        "../shopify.server": {
+          authenticate: {
+            public: {
+              appProxy: async () => ({
+                session: { shop: "proxy.test" },
+                admin: {},
+              }),
+            },
+          },
+        },
+        "../db.server": { __esModule: true, default: db },
+        "../features/widgets/widget.constants": {
+          WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
+          WIDGET_TYPES: {
+            ANNOUNCEMENT: "ANNOUNCEMENT",
+            NOTICE: "NOTICE",
+            COUNTDOWN: "COUNTDOWN",
+          },
+        },
+        "../features/widgets/widget.server": {
+          widgetScope: (shop, widgetType) => ({
+            shopDomain: shop,
+            type: widgetType,
+          }),
+        },
+        "../features/billing/storefront-plan.server": {
+          getStorefrontWidgetLimit: async () => 10,
+        },
+        "../features/widgets/targeting.shared": {
+          __esModule: true,
+          matchesTargeting,
+          readTargetingContext,
+          readTargetingForm,
+        },
+        "../features/widgets/targeting.server": {
+          getCachedMatchingCollectionIds: async () => [],
+        },
+        "../features/widgets/country-targeting.server": {
+          filterByCountryTargeting,
+        },
+        "../features/widgets/country-resolution.server": {
+          resolveVisitorCountry: async () => {
+            resolverCalls += 1;
+            if (outcome === "rejected") {
+              throw new Error("synthetic resolver failure");
+            }
+            return null;
+          },
+        },
+      };
+      const route = loadActualRoute(path, mocks);
+      const originalConsoleError = console.error;
+      const errors = [];
+      console.error = (...args) => errors.push(args.join(" "));
+
+      try {
+        const response = await route.loader({
+          request: new Request(
+            "https://shop.test/apps/notice-pro?format=multi",
+          ),
+        });
+        const body = await response.json();
+
+        assert.equal(response.headers.get("Cache-Control"), "no-store");
+        assert.equal(resolverCalls, 1);
+        assert.deepEqual(body[plural].map((item) => item.message), ["all"]);
+        assert.doesNotMatch(
+          JSON.stringify(body),
+          /countryTargetingMode|targetCountryCodes|visitorIp|resolvedCountry/i,
+        );
+        if (type === "COUNTDOWN") assert.ok(body.serverNow);
+        assert.equal(
+          errors.length,
+          outcome === "rejected" ? 1 : 0,
+        );
+        if (outcome === "rejected") {
+          assert.match(errors[0], /country resolution failed/i);
+          assert.doesNotMatch(errors[0], /synthetic resolver failure|US/);
+        }
+      } finally {
+        console.error = originalConsoleError;
+      }
+    }
+  }
+});
+
+test("signed country assertions work through all three proxy actions and invalid assertions keep ALL", async () => {
+  const savedEnvironment = {
+    enabled: process.env.NOTICEPRO_COUNTRY_ATTESTATION_ENABLED,
+    secret: process.env.NOTICEPRO_COUNTRY_ATTESTATION_SECRET,
+    workerUrl: process.env.NOTICEPRO_COUNTRY_ATTESTATION_WORKER_URL,
+  };
+  const secret = "b".repeat(64);
+  const shop = "noticepro-proxy-test.myshopify.com";
+  const now = Date.now();
+  process.env.NOTICEPRO_COUNTRY_ATTESTATION_ENABLED = "true";
+  process.env.NOTICEPRO_COUNTRY_ATTESTATION_SECRET = secret;
+  process.env.NOTICEPRO_COUNTRY_ATTESTATION_WORKER_URL =
+    "https://worker.test/attest";
+
+  try {
+    const challenge = issueCountryChallenge(shop, secret, now);
+    const worker = createCountryAttestationWorker(() => now);
+    const workerRequest = new Request("https://worker.test/attest", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: challenge,
+    });
+    Object.defineProperty(workerRequest, "cf", { value: { country: "US" } });
+    const signedResponse = await worker.fetch(workerRequest, {
+      NOTICEPRO_COUNTRY_ATTESTATION_SECRET: secret,
+    });
+    const { assertion } = await signedResponse.json();
+    const wrongShopChallenge = issueCountryChallenge(
+      "different-shop.myshopify.com",
+      secret,
+      now,
+    );
+    const wrongShopRequest = new Request("https://worker.test/attest", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: wrongShopChallenge,
+    });
+    Object.defineProperty(wrongShopRequest, "cf", {
+      value: { country: "US" },
+    });
+    const wrongShopResponse = await worker.fetch(wrongShopRequest, {
+      NOTICEPRO_COUNTRY_ATTESTATION_SECRET: secret,
+    });
+    const { assertion: wrongShopAssertion } = await wrongShopResponse.json();
+
+    const cases = [
+      ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements"],
+      ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices"],
+      ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns"],
+    ];
+
+    for (const [path, type, plural] of cases) {
+      const db = makeDb();
+      db.widget.findMany = async () => [
+        {
+          id: "all",
+          targetingMode: "ALL",
+          targetProductIds: [],
+          targetCollectionIds: [],
+          countryTargetingMode: "ALL",
+          targetCountryCodes: [],
+          message: "all",
+          buttonText: null,
+          buttonUrl: null,
+          position: "TOP",
+          backgroundColor: "#111111",
+          textColor: "#FFFFFF",
+          dismissible: true,
+          countdownEndsAt: "2099-01-01T00:00:00.000Z",
+          countdownShowDays: true,
+          countdownSticky: false,
+          countdownDesktopOffset: 0,
+          countdownMobileOffset: 0,
+          countdownExpiredText: "Expired",
+        },
+        {
+          id: "selected",
+          targetingMode: "ALL",
+          targetProductIds: [],
+          targetCollectionIds: [],
+          countryTargetingMode: "SELECTED",
+          targetCountryCodes: ["US"],
+          message: "selected",
+          buttonText: null,
+          buttonUrl: null,
+          position: "TOP",
+          backgroundColor: "#222222",
+          textColor: "#FFFFFF",
+          dismissible: true,
+          countdownEndsAt: "2099-01-01T00:00:00.000Z",
+          countdownShowDays: true,
+          countdownSticky: false,
+          countdownDesktopOffset: 0,
+          countdownMobileOffset: 0,
+          countdownExpiredText: "Expired",
+        },
+      ];
+
+      const mocks = {
+        "../shopify.server": {
+          authenticate: {
+            public: {
+              appProxy: async () => ({ session: { shop }, admin: {} }),
+            },
+          },
+        },
+        "../db.server": { __esModule: true, default: db },
+        "../features/widgets/widget.constants": {
+          WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
+          WIDGET_TYPES: {
+            ANNOUNCEMENT: "ANNOUNCEMENT",
+            NOTICE: "NOTICE",
+            COUNTDOWN: "COUNTDOWN",
+          },
+        },
+        "../features/widgets/widget.server": {
+          widgetScope: (shopDomain, widgetType) => ({
+            shopDomain,
+            type: widgetType,
+          }),
+        },
+        "../features/billing/storefront-plan.server": {
+          getStorefrontWidgetLimit: async () => 10,
+        },
+        "../features/widgets/targeting.shared": {
+          __esModule: true,
+          matchesTargeting,
+          readTargetingContext,
+          readTargetingForm,
+        },
+        "../features/widgets/targeting.server": {
+          getCachedMatchingCollectionIds: async () => [],
+        },
+        "../features/widgets/country-targeting.server": {
+          filterByCountryTargeting,
+        },
+        "../features/widgets/country-resolution.server": {
+          resolveVisitorCountry,
+        },
+      };
+      const route = loadActualRoute(path, mocks);
+      const url =
+        "https://storefront.test/apps/noticepro/widget?format=multi&np_page=other";
+      const requestFor = (payload) =>
+        new Request(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+      const validResponse = await route.action({
+        request: requestFor({ challenge, assertion }),
+      });
+      const validBody = await validResponse.json();
+      assert.equal(validResponse.headers.get("Cache-Control"), "no-store");
+      assert.deepEqual(
+        validBody[plural].map(({ message }) => message),
+        ["all", "selected"],
+      );
+      assert.equal("countryTargetingMode" in validBody[plural][0], false);
+
+      const invalidResponse = await route.action({
+        request: requestFor({
+          challenge: wrongShopChallenge,
+          assertion: wrongShopAssertion,
+        }),
+      });
+      const invalidBody = await invalidResponse.json();
+      assert.deepEqual(
+        invalidBody[plural].map(({ message }) => message),
+        ["all"],
+      );
+      assert.doesNotMatch(
+        JSON.stringify(invalidBody),
+        /198\.51\.100|192\.0\.2|countryTargetingMode|targetCountryCodes/i,
+      );
+      if (type === "COUNTDOWN") {
+        assert.ok(validBody.serverNow);
+        assert.ok(invalidBody.serverNow);
+      }
+    }
+  } finally {
+    for (const [name, value] of [
+      ["NOTICEPRO_COUNTRY_ATTESTATION_ENABLED", savedEnvironment.enabled],
+      ["NOTICEPRO_COUNTRY_ATTESTATION_SECRET", savedEnvironment.secret],
+      ["NOTICEPRO_COUNTRY_ATTESTATION_WORKER_URL", savedEnvironment.workerUrl],
+    ]) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("actual proxy loaders skip resolution when no page-eligible selection needs it", async () => {
+  const cases = [
+    ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT"],
+    ["../app/routes/api.proxy.notice.ts", "NOTICE"],
+    ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN"],
+  ];
+
+  for (const [path, type] of cases) {
+    for (const rows of [
+      [
+        {
+          id: "all",
+          targetingMode: "ALL",
+          targetProductIds: [],
+          targetCollectionIds: [],
+          countryTargetingMode: COUNTRY_TARGETING_MODES.ALL,
+          targetCountryCodes: [],
+          message: "all",
+        },
+      ],
+      [
+        {
+          id: "page-mismatch",
+          targetingMode: "PRODUCTS",
+          targetProductIds: ["gid://shopify/Product/999"],
+          targetCollectionIds: [],
+          countryTargetingMode: COUNTRY_TARGETING_MODES.SELECTED,
+          targetCountryCodes: ["US"],
+          message: "not eligible",
+        },
+      ],
+    ]) {
+      const db = makeDb();
+      db.widget.findMany = async () => rows;
+      let resolverCalls = 0;
+      const mocks = {
+        "../shopify.server": {
+          authenticate: {
+            public: {
+              appProxy: async () => ({ session: { shop: "proxy.test" }, admin: {} }),
+            },
+          },
+        },
+        "../db.server": { __esModule: true, default: db },
+        "../features/widgets/widget.constants": {
+          WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
+          WIDGET_TYPES: {
+            ANNOUNCEMENT: "ANNOUNCEMENT",
+            NOTICE: "NOTICE",
+            COUNTDOWN: "COUNTDOWN",
+          },
+        },
+        "../features/widgets/widget.server": {
+          widgetScope: (shop, widgetType) => ({
+            shopDomain: shop,
+            type: widgetType,
+          }),
+        },
+        "../features/billing/storefront-plan.server": {
+          getStorefrontWidgetLimit: async () => 10,
+        },
+        "../features/widgets/targeting.shared": {
+          __esModule: true,
+          matchesTargeting,
+          readTargetingContext,
+          readTargetingForm,
+        },
+        "../features/widgets/targeting.server": {
+          getCachedMatchingCollectionIds: async () => [],
+        },
+        "../features/widgets/country-targeting.server": {
+          filterByCountryTargeting,
+        },
+        "../features/widgets/country-resolution.server": {
+          resolveVisitorCountry: async () => {
+            resolverCalls += 1;
+            return "US";
+          },
+        },
+      };
+      const route = loadActualRoute(path, mocks);
+      const requestUrl =
+        rows[0].targetingMode === "PRODUCTS"
+          ? "https://shop.test/apps/notice-pro?np_page=product&np_product=101"
+          : "https://shop.test/apps/notice-pro";
+
+      await route.loader({ request: new Request(requestUrl) });
+      assert.equal(resolverCalls, 0);
     }
   }
 });
@@ -1259,6 +2360,7 @@ test("actual proxy auth failure skips database access and unknown modes fail clo
     "../app/routes/api.proxy.countdown.ts",
   ]) {
     let dbCalls = 0;
+    let resolutionCalls = 0;
     const db = makeDb();
     db.widget.findMany = async () => { dbCalls += 1; return []; };
     const mocks = {
@@ -1283,6 +2385,12 @@ test("actual proxy auth failure skips database access and unknown modes fail clo
         readTargetingForm,
       },
       "../features/widgets/targeting.server": { getCachedMatchingCollectionIds: async () => [] },
+      "../features/widgets/country-resolution.server": {
+        resolveVisitorCountry: async () => {
+          resolutionCalls += 1;
+          return "US";
+        },
+      },
     };
     const route = loadActualRoute(path, mocks);
     const response = await route.loader({
@@ -1290,6 +2398,7 @@ test("actual proxy auth failure skips database access and unknown modes fail clo
     });
     assert.equal(response.status, 401);
     assert.equal(dbCalls, 0);
+    assert.equal(resolutionCalls, 0);
   }
 
   assert.equal(matchesTargeting(
@@ -1311,6 +2420,8 @@ test("proxy membership failure retains ALL/direct-product matches and excludes c
         targetingMode: "ALL",
         targetProductIds: [],
         targetCollectionIds: [],
+        countryTargetingMode: "ALL",
+        targetCountryCodes: [],
         message: "all",
         buttonText: null,
         buttonUrl: null,
@@ -1330,6 +2441,8 @@ test("proxy membership failure retains ALL/direct-product matches and excludes c
         targetingMode: "PRODUCTS",
         targetProductIds: ["gid://shopify/Product/101"],
         targetCollectionIds: [],
+        countryTargetingMode: "ALL",
+        targetCountryCodes: [],
         message: "direct",
         buttonText: null,
         buttonUrl: null,
@@ -1349,6 +2462,8 @@ test("proxy membership failure retains ALL/direct-product matches and excludes c
         targetingMode: "COLLECTIONS",
         targetProductIds: [],
         targetCollectionIds: ["gid://shopify/Collection/201"],
+        countryTargetingMode: "ALL",
+        targetCountryCodes: [],
         message: "collection",
         buttonText: null,
         buttonUrl: null,
