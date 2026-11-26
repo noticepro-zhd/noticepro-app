@@ -44,6 +44,11 @@ import {
   toScheduleInput,
 } from "../features/widgets/scheduling.shared";
 
+import {
+  useWidgetTemplates,
+  WidgetTemplatePicker,
+} from "../features/widgets/widget-templates";
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
 
@@ -342,6 +347,11 @@ export default function AppHome() {
     editingWidget?.id ?? null,
     mutationSignal,
   );
+  const { template, templateKey, applyTemplate } = useWidgetTemplates(
+    editorResetKey,
+    "ANNOUNCEMENT",
+  );
+
   const isEditing = Boolean(editingWidget);
 
   useEffect(() => {
@@ -412,12 +422,18 @@ export default function AppHome() {
                 required
               />
 
+              <WidgetTemplatePicker
+                solution="ANNOUNCEMENT"
+                onApply={applyTemplate}
+              />
+
               <s-text-area
                 label="Announcement message"
+                key={templateKey}
                 name="message"
                 placeholder="Free shipping on orders over $50"
                 rows={4}
-                defaultValue={editingWidget?.message ?? ""}
+                defaultValue={template?.message ?? editingWidget?.message ?? ""}
                 required
               />
 
@@ -474,9 +490,14 @@ export default function AppHome() {
                 <label>
                   Background color
                   <input
+                    key={templateKey}
                     name="backgroundColor"
                     type="color"
-                    defaultValue={editingWidget?.backgroundColor ?? "#111827"}
+                    defaultValue={
+                      template?.backgroundColor ??
+                      editingWidget?.backgroundColor ??
+                      "#111827"
+                    }
                     style={{ display: "block", marginTop: "6px" }}
                   />
                 </label>
@@ -484,9 +505,14 @@ export default function AppHome() {
                 <label>
                   Text color
                   <input
+                    key={templateKey}
                     name="textColor"
                     type="color"
-                    defaultValue={editingWidget?.textColor ?? "#FFFFFF"}
+                    defaultValue={
+                      template?.textColor ??
+                      editingWidget?.textColor ??
+                      "#FFFFFF"
+                    }
                     style={{ display: "block", marginTop: "6px" }}
                   />
                 </label>

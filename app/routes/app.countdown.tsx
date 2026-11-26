@@ -46,6 +46,11 @@ import {
   toScheduleInput,
 } from "../features/widgets/scheduling.shared";
 
+import {
+  useWidgetTemplates,
+  WidgetTemplatePicker,
+} from "../features/widgets/widget-templates";
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
 
@@ -352,6 +357,11 @@ export default function CountdownPage() {
     mutationSignal,
   );
 
+  const { template, templateKey, applyTemplate } = useWidgetTemplates(
+    editorResetKey,
+    "COUNTDOWN",
+  );
+
   const [deadlineLocal, setDeadlineLocal] = useState("");
   const [timeZone] = useState(storeTimeZone);
   const ready = Boolean(timeZone);
@@ -465,14 +475,22 @@ export default function CountdownPage() {
                 />
               </label>
 
+              <WidgetTemplatePicker
+                solution="COUNTDOWN"
+                onApply={applyTemplate}
+              />
+
               <label>
                 Offer message
                 <textarea
+                  key={templateKey}
                   name="message"
                   required
                   rows={3}
                   defaultValue={
-                    editingCountdown?.message ?? "Special offer ends soon!"
+                    template?.message ??
+                    editingCountdown?.message ??
+                    "Special offer ends soon!"
                   }
                   style={countdownInputStyle}
                 />
@@ -515,9 +533,12 @@ export default function CountdownPage() {
                   Background color
                   <input
                     type="color"
+                    key={templateKey}
                     name="backgroundColor"
                     defaultValue={
-                      editingCountdown?.backgroundColor ?? "#00B9B8"
+                      template?.backgroundColor ??
+                      editingCountdown?.backgroundColor ??
+                      "#00B9B8"
                     }
                     style={{
                       ...countdownInputStyle,
@@ -531,8 +552,13 @@ export default function CountdownPage() {
                   Text color
                   <input
                     type="color"
+                    key={templateKey}
                     name="textColor"
-                    defaultValue={editingCountdown?.textColor ?? "#FFFFFF"}
+                    defaultValue={
+                      template?.textColor ??
+                      editingCountdown?.textColor ??
+                      "#FFFFFF"
+                    }
                     style={{
                       ...countdownInputStyle,
                       height: "48px",
@@ -696,10 +722,7 @@ export default function CountdownPage() {
                   Deadline:{" "}
                   {countdown.countdownEndsAt
                     ? storeTimeZone
-                      ? formatSchedule(
-                          countdown.countdownEndsAt,
-                          storeTimeZone,
-                        )
+                      ? formatSchedule(countdown.countdownEndsAt, storeTimeZone)
                       : "Store timezone unavailable"
                     : "Not set"}
                 </p>

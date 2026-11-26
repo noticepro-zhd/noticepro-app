@@ -233,6 +233,14 @@ function makeAdminMocks({
     "../features/widgets/targeting.server": {
       verifyTargetingSelection: async () => state.verification,
     },
+    "../features/widgets/widget-templates": {
+      WidgetTemplatePicker: () => null,
+      useWidgetTemplates: () => ({
+        template: null,
+        templateKey: "test-template",
+        applyTemplate: () => null,
+      }),
+    },
     "../components/LoadingSubmitButton": {
       __esModule: true,
       default: () => null,

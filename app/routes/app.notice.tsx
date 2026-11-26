@@ -43,6 +43,10 @@ import {
   parseScheduleInputPreservingInstant,
   toScheduleInput,
 } from "../features/widgets/scheduling.shared";
+import {
+  useWidgetTemplates,
+  WidgetTemplatePicker,
+} from "../features/widgets/widget-templates";
 
 const DISPATCH_EXAMPLE =
   "Made to order. Usually dispatches within 1–2 business days.";
@@ -366,6 +370,12 @@ function NoticePageContent({
   const [scheduleTimeZone] = useState(storeTimeZone);
   const isEditing = Boolean(editorNotice);
   const [message, setMessage] = useState(editorNotice?.message ?? "");
+
+  const { template, templateKey, applyTemplate } =
+    useWidgetTemplates(
+      String(editorNotice?.id ?? "create"),
+      "NOTICE",
+    );
   const [noticeKind, setNoticeKind] = useState(
     editorNotice?.noticeKind === NOTICE_KINDS.DISPATCH
       ? NOTICE_KINDS.DISPATCH
@@ -457,6 +467,14 @@ function NoticePageContent({
                 </select>
               </label>
 
+              <WidgetTemplatePicker
+                solution="NOTICE"
+                onApply={(id) => {
+                  const selected = applyTemplate(id);
+                  if (selected) setMessage(selected.message);
+                }}
+              />
+
               <label>
                 Notice message
                 <textarea
@@ -536,9 +554,14 @@ function NoticePageContent({
                 <label>
                   Background color
                   <input
+                    key={templateKey}
                     name="backgroundColor"
                     type="color"
-                    defaultValue={editorNotice?.backgroundColor ?? "#FEF3C7"}
+                    defaultValue={
+                      template?.backgroundColor ??
+                      editorNotice?.backgroundColor ??
+                      "#FEF3C7"
+                    }
                     style={{ display: "block", marginTop: "6px" }}
                   />
                 </label>
@@ -546,9 +569,14 @@ function NoticePageContent({
                 <label>
                   Text color
                   <input
+                    key={templateKey}
                     name="textColor"
                     type="color"
-                    defaultValue={editorNotice?.textColor ?? "#111827"}
+                    defaultValue={
+                      template?.textColor ??
+                      editorNotice?.textColor ??
+                      "#111827"
+                    }
                     style={{ display: "block", marginTop: "6px" }}
                   />
                 </label>
