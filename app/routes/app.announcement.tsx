@@ -48,6 +48,7 @@ import {
   useWidgetTemplates,
   WidgetTemplatePicker,
 } from "../features/widgets/widget-templates";
+import { readWidgetTemplateSelection } from "../features/widgets/templates.shared";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -88,6 +89,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
   const formData = await request.formData();
+
+  const templateSelection = readWidgetTemplateSelection(
+    formData,
+    "ANNOUNCEMENT",
+  );
+
+  if (!templateSelection.ok) {
+    return { error: templateSelection.error };
+  }
 
   const actionType = String(formData.get("_action") || "create");
   const widgetId = String(formData.get("widgetId") || "");
@@ -281,6 +291,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const widgetData = {
     ...targeting.data,
     ...countryTargeting.data,
+    ...templateSelection.data,
     type: WIDGET_TYPES.ANNOUNCEMENT,
     name,
     status,
@@ -347,10 +358,12 @@ export default function AppHome() {
     editingWidget?.id ?? null,
     mutationSignal,
   );
-  const { template, templateKey, applyTemplate } = useWidgetTemplates(
-    editorResetKey,
-    "ANNOUNCEMENT",
-  );
+  const { template, templateKey, applyTemplate, sourceTemplateId } =
+    useWidgetTemplates(
+      editorResetKey,
+      "ANNOUNCEMENT",
+      editingWidget?.sourceTemplateId,
+    );
 
   const isEditing = Boolean(editingWidget);
 
@@ -424,6 +437,7 @@ export default function AppHome() {
 
               <WidgetTemplatePicker
                 solution="ANNOUNCEMENT"
+                sourceTemplateId={sourceTemplateId}
                 onApply={applyTemplate}
               />
 

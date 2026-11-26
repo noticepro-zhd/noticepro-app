@@ -84,6 +84,58 @@ export const WIDGET_TEMPLATES: Record<
   ],
 };
 
+export type TemplateSelectionResult =
+  | {
+      ok: true;
+      data: {
+        sourceTemplateId?: string | null;
+      };
+    }
+  | {
+      ok: false;
+      error: string;
+    };
+
+export function readWidgetTemplateSelection(
+  formData: FormData,
+  solution: WidgetTemplateSolution,
+): TemplateSelectionResult {
+  // Old forms must not clear an existing template association.
+  if (!formData.has("sourceTemplateId")) {
+    return { ok: true, data: {} };
+  }
+
+  const submitted = formData.get("sourceTemplateId");
+
+  if (typeof submitted !== "string") {
+    return {
+      ok: false,
+      error: "Please choose a valid template.",
+    };
+  }
+
+  const id = submitted.trim();
+
+  if (!id) {
+    return {
+      ok: true,
+      data: { sourceTemplateId: null },
+    };
+  }
+
+  if (!getWidgetTemplate(solution, id)) {
+    return {
+      ok: false,
+      error: "The selected template is invalid for this widget.",
+    };
+  }
+
+  return {
+    ok: true,
+    data: { sourceTemplateId: id },
+  };
+}
+
 export function getWidgetTemplate(
   solution: WidgetTemplateSolution,
   id: string,

@@ -79,10 +79,18 @@ function makeHookHarness() {
   const { useWidgetTemplates } = loadTemplateUi(react);
 
   return {
-    render(resetKey, solution = "ANNOUNCEMENT") {
+    render(
+      resetKey,
+      solution = "ANNOUNCEMENT",
+      initialSourceTemplateId = null,
+    ) {
       for (let attempt = 0; attempt < 5; attempt++) {
         changed = false;
-        const result = useWidgetTemplates(resetKey, solution);
+        const result = useWidgetTemplates(
+          resetKey,
+          solution,
+          initialSourceTemplateId,
+        );
 
         if (!changed) return result;
       }
@@ -262,4 +270,113 @@ test("routes remount only template fields and retain existing Form identity", ()
       assert.match(source, /key=\{editorResetKey\}/);
     }
   }
+});
+
+test("template selection parser preserves legacy forms and validates solution IDs", () => {
+  const missing = new FormData();
+
+  assert.deepEqual(
+    templates.readWidgetTemplateSelection(missing, "ANNOUNCEMENT"),
+    { ok: true, data: {} },
+  );
+
+  for (const solution of ["ANNOUNCEMENT", "NOTICE", "COUNTDOWN"]) {
+    const empty = new FormData();
+    empty.set("sourceTemplateId", "");
+
+    assert.deepEqual(templates.readWidgetTemplateSelection(empty, solution), {
+      ok: true,
+      data: { sourceTemplateId: null },
+    });
+
+    const preset = templates.WIDGET_TEMPLATES[solution][0];
+    const valid = new FormData();
+    valid.set("sourceTemplateId", preset.id);
+
+    assert.deepEqual(templates.readWidgetTemplateSelection(valid, solution), {
+      ok: true,
+      data: { sourceTemplateId: preset.id },
+    });
+
+    const invalid = new FormData();
+    invalid.set("sourceTemplateId", "unknown-template");
+
+    assert.equal(
+      templates.readWidgetTemplateSelection(invalid, solution).ok,
+      false,
+    );
+
+    const otherSolution = solution === "NOTICE" ? "COUNTDOWN" : "NOTICE";
+
+    invalid.set(
+      "sourceTemplateId",
+      templates.WIDGET_TEMPLATES[otherSolution][0].id,
+    );
+
+    assert.equal(
+      templates.readWidgetTemplateSelection(invalid, solution).ok,
+      false,
+    );
+  }
+});
+
+test("saved template identity restores without applying preset values", () => {
+  const harness = makeHookHarness();
+
+  let result = harness.render(
+    "edit-saved",
+    "ANNOUNCEMENT",
+    "announcement-featured",
+  );
+
+  assert.equal(result.sourceTemplateId, "announcement-featured");
+  assert.equal(result.template, null);
+
+  const originalKey = result.templateKey;
+
+  result = harness.render(
+    "edit-saved",
+    "ANNOUNCEMENT",
+    "announcement-featured",
+  );
+
+  assert.equal(result.sourceTemplateId, "announcement-featured");
+  assert.equal(result.template, null);
+  assert.equal(result.templateKey, originalKey);
+
+  result.applyTemplate("announcement-welcome");
+
+  result = harness.render(
+    "edit-saved",
+    "ANNOUNCEMENT",
+    "announcement-featured",
+  );
+
+  assert.equal(result.sourceTemplateId, "announcement-welcome");
+  assert.equal(result.template.id, "announcement-welcome");
+  assert.notEqual(result.templateKey, originalKey);
+});
+
+test("saved picker identity renders selected and is submitted separately", () => {
+  const { WidgetTemplatePicker } = loadTemplateUi();
+
+  const html = renderToStaticMarkup(
+    React.createElement(WidgetTemplatePicker, {
+      solution: "ANNOUNCEMENT",
+      sourceTemplateId: "announcement-featured",
+      onApply() {
+        throw new Error("Restoring must not Apply");
+      },
+    }),
+  );
+
+  assert.match(html, /<option[^>]*value="announcement-featured"[^>]*selected/);
+
+  assert.match(
+    html,
+    /<input[^>]*name="sourceTemplateId"[^>]*value="announcement-featured"/,
+  );
+
+  // Browsing another option must not submit the dropdown itself.
+  assert.doesNotMatch(html, /<select[^>]*name=/);
 });

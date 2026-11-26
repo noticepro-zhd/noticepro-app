@@ -35,6 +35,8 @@ import {
   canActivateAnotherWidget,
 } from "../app/features/billing/plan-policy.server.ts";
 
+import * as widgetTemplateHelpers from "../app/features/widgets/templates.shared.ts";
+
 function loadActualRoute(relativePath, mocks) {
   const source = fs.readFileSync(
     new URL(relativePath, import.meta.url),
@@ -115,6 +117,10 @@ function loadActualRoute(relativePath, mocks) {
         loadActualRoute("../app/features/widgets/scheduling.server.ts", mocks)
       );
     }
+    if (specifier === "../features/widgets/templates.shared") {
+      return widgetTemplateHelpers;
+    }
+
     if (Object.prototype.hasOwnProperty.call(mocks, specifier)) {
       return mocks[specifier];
     }
@@ -3251,5 +3257,103 @@ test("all three scheduling actions reject forms opened before a store timezone c
     assert.match(result.error, /timezone.*changed|form.*outdated/i, solution);
 
     assert.equal(writes, 0, solution);
+  }
+});
+
+test("all widget actions persist template identity without replacing customized content", async () => {
+  const cases = [
+    ["announcement", "announcement-featured", "notice-update"],
+    ["notice", "notice-shipping", "announcement-welcome"],
+    ["countdown", "countdown-launch", "notice-update"],
+  ];
+
+  for (const [solution, templateId, invalidId] of cases) {
+    const db = makeDb();
+    let saved = null;
+    let writes = 0;
+
+    db.widget.create = async (args) => {
+      writes++;
+      saved = { id: "template-widget", ...args.data };
+      return saved;
+    };
+
+    db.widget.findFirst = async () => saved;
+
+    db.widget.updateMany = async (args) => {
+      writes++;
+      saved = { ...saved, ...args.data };
+      return { count: 1 };
+    };
+
+    const { mocks } = makeAdminMocks({ db });
+    const route = loadActualRoute(
+      "../app/routes/app." + solution + ".tsx",
+      mocks,
+    );
+
+    const base = {
+      _action: "create",
+      name: "Customized template",
+      message: "My edited message, not the preset text",
+      noticeKind: "DISPATCH",
+      status: "DRAFT",
+      targetingMode: "ALL",
+      backgroundColor: "#123456",
+      textColor: "#FEDCBA",
+      scheduleTimeZone: "UTC",
+      startsAt: "",
+      endsAt: "",
+      countdownTimeZone: "UTC",
+      countdownLocalTime: "2099-01-01T12:00",
+      countdownDesktopOffset: "0",
+      countdownMobileOffset: "0",
+      sourceTemplateId: templateId,
+    };
+
+    async function submit(entries) {
+      return route.action({
+        request: new Request("https://shop.test/app/test", {
+          method: "POST",
+          body: form(entries),
+        }),
+      });
+    }
+
+    const created = await submit(base);
+
+    assert.ok(created.redirect, solution);
+    assert.equal(saved.sourceTemplateId, templateId, solution);
+    assert.equal(saved.message, base.message, solution);
+    assert.equal(saved.backgroundColor, "#123456", solution);
+    assert.equal(saved.textColor, "#FEDCBA", solution);
+
+    const legacyUpdate = {
+      ...base,
+      _action: "update",
+      widgetId: "template-widget",
+      message: "Edited again without a template field",
+    };
+
+    delete legacyUpdate.sourceTemplateId;
+
+    const updated = await submit(legacyUpdate);
+
+    assert.ok(updated.redirect, solution);
+    assert.equal(saved.sourceTemplateId, templateId, solution);
+    assert.equal(saved.message, legacyUpdate.message, solution);
+
+    const writesBeforeInvalid = writes;
+
+    const invalid = await submit({
+      ...base,
+      _action: "update",
+      widgetId: "template-widget",
+      sourceTemplateId: invalidId,
+    });
+
+    assert.equal(typeof invalid.error, "string", solution);
+    assert.equal(writes, writesBeforeInvalid, solution);
+    assert.equal(saved.sourceTemplateId, templateId, solution);
   }
 });

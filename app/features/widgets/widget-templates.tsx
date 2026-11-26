@@ -10,22 +10,28 @@ type TemplateState = {
   resetKey: string;
   revision: number;
   template: WidgetTemplate | null;
+  sourceTemplateId: string | null;
 };
 
 export function useWidgetTemplates(
   resetKey: string,
   solution: WidgetTemplateSolution,
+  initialSourceTemplateId?: string | null,
 ) {
+  const savedTemplate = getWidgetTemplate(
+    solution,
+    initialSourceTemplateId ?? "",
+  );
+
   const freshState: TemplateState = {
     resetKey,
     revision: 0,
+    // Restoring identity must not overwrite saved/customized values.
     template: null,
+    sourceTemplateId: savedTemplate?.id ?? null,
   };
 
   const [state, setState] = useState<TemplateState>(freshState);
-
-  // Reset only when editor identity changes, not on validation errors
-  // or ordinary loader revalidation.
   const current = state.resetKey === resetKey ? state : freshState;
 
   if (state.resetKey !== resetKey) {
@@ -40,6 +46,7 @@ export function useWidgetTemplates(
       resetKey,
       revision: previous.resetKey === resetKey ? previous.revision + 1 : 1,
       template: selected,
+      sourceTemplateId: selected.id,
     }));
 
     return selected;
@@ -48,20 +55,26 @@ export function useWidgetTemplates(
   return {
     template: current.template,
     templateKey: `${resetKey}:${current.revision}`,
+    sourceTemplateId: current.sourceTemplateId,
     applyTemplate,
   };
 }
 
 type WidgetTemplatePickerProps = {
   solution: WidgetTemplateSolution;
+  sourceTemplateId?: string | null;
   onApply: (id: string) => void;
 };
 
 export function WidgetTemplatePicker({
   solution,
+  sourceTemplateId,
   onApply,
 }: WidgetTemplatePickerProps) {
-  const [selectedId, setSelectedId] = useState("");
+  const [selectedId, setSelectedId] = useState(
+    getWidgetTemplate(solution, sourceTemplateId ?? "")?.id ?? "",
+  );
+
   const selected = getWidgetTemplate(solution, selectedId);
 
   return (
@@ -72,6 +85,12 @@ export function WidgetTemplatePicker({
         borderRadius: "8px",
       }}
     >
+      <input
+        type="hidden"
+        name="sourceTemplateId"
+        value={sourceTemplateId ?? ""}
+      />
+
       <label>
         Ready-made template
         <select

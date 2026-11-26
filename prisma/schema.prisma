@@ -42,9 +42,10 @@ model Widget {
   status     String @default("DRAFT")
   noticeKind String @default("GENERAL")
 
-  message    String
-  buttonText String?
-  buttonUrl  String?
+  message          String
+  buttonText       String?
+  buttonUrl        String?
+  sourceTemplateId String?
 
   position        String  @default("TOP")
   backgroundColor String  @default("#111827")

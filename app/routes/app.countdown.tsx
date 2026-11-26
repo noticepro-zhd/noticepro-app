@@ -50,6 +50,7 @@ import {
   useWidgetTemplates,
   WidgetTemplatePicker,
 } from "../features/widgets/widget-templates";
+import { readWidgetTemplateSelection } from "../features/widgets/templates.shared";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -86,6 +87,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
   const formData = await request.formData();
+
+  const templateSelection = readWidgetTemplateSelection(
+    formData,
+    "COUNTDOWN",
+  );
+
+  if (!templateSelection.ok) {
+    return { error: templateSelection.error };
+  }
 
   const actionType = String(formData.get("_action") || "create");
   const widgetId = String(formData.get("widgetId") || "");
@@ -282,6 +292,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const countdownData = {
     ...targeting.data,
     ...countryTargeting.data,
+    ...templateSelection.data,
     type: WIDGET_TYPES.COUNTDOWN,
     name,
     message,
@@ -357,9 +368,10 @@ export default function CountdownPage() {
     mutationSignal,
   );
 
-  const { template, templateKey, applyTemplate } = useWidgetTemplates(
+  const { template, templateKey, applyTemplate, sourceTemplateId } = useWidgetTemplates(
     editorResetKey,
     "COUNTDOWN",
+    editingCountdown?.sourceTemplateId,
   );
 
   const [deadlineLocal, setDeadlineLocal] = useState("");
@@ -477,6 +489,7 @@ export default function CountdownPage() {
 
               <WidgetTemplatePicker
                 solution="COUNTDOWN"
+                sourceTemplateId={sourceTemplateId}
                 onApply={applyTemplate}
               />
 

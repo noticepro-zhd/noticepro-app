@@ -47,6 +47,7 @@ import {
   useWidgetTemplates,
   WidgetTemplatePicker,
 } from "../features/widgets/widget-templates";
+import { readWidgetTemplateSelection } from "../features/widgets/templates.shared";
 
 const DISPATCH_EXAMPLE =
   "Made to order. Usually dispatches within 1–2 business days.";
@@ -90,6 +91,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
   const formData = await request.formData();
+
+  const templateSelection = readWidgetTemplateSelection(
+    formData,
+    "NOTICE",
+  );
+
+  if (!templateSelection.ok) {
+    return { error: templateSelection.error };
+  }
 
   const actionType = String(formData.get("_action") || "create");
   const widgetId = String(formData.get("widgetId") || "");
@@ -281,6 +291,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const noticeData = {
     ...targeting.data,
     ...countryTargeting.data,
+    ...templateSelection.data,
     type: WIDGET_TYPES.NOTICE,
     noticeKind,
     name,
@@ -371,10 +382,11 @@ function NoticePageContent({
   const isEditing = Boolean(editorNotice);
   const [message, setMessage] = useState(editorNotice?.message ?? "");
 
-  const { template, templateKey, applyTemplate } =
+  const { template, templateKey, applyTemplate, sourceTemplateId } =
     useWidgetTemplates(
       String(editorNotice?.id ?? "create"),
       "NOTICE",
+      editorNotice?.sourceTemplateId,
     );
   const [noticeKind, setNoticeKind] = useState(
     editorNotice?.noticeKind === NOTICE_KINDS.DISPATCH
@@ -469,6 +481,7 @@ function NoticePageContent({
 
               <WidgetTemplatePicker
                 solution="NOTICE"
+                sourceTemplateId={sourceTemplateId}
                 onApply={(id) => {
                   const selected = applyTemplate(id);
                   if (selected) setMessage(selected.message);
