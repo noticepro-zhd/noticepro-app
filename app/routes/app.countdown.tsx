@@ -38,6 +38,13 @@ import {
   getWidgetEditorResetKey,
 } from "../features/widgets/widget-editor-reset";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
+import { getShopScheduleTimeZone } from "../features/widgets/scheduling.server";
+
+import {
+  formatSchedule,
+  parseScheduleInputPreservingInstant,
+  toScheduleInput,
+} from "../features/widgets/scheduling.shared";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -63,7 +70,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
       })
     : null;
 
-  return { countdowns, editingCountdown, plan };
+  return {
+    countdowns,
+    editingCountdown,
+    plan,
+    storeTimeZone: await getShopScheduleTimeZone(admin),
+  };
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -114,11 +126,24 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const textColor = String(formData.get("textColor") || "#FFFFFF").trim();
 
-  const deadlineValue = String(formData.get("countdownEndsAt") || "").trim();
-
-  const countdownTimeZone = String(
-    formData.get("countdownTimeZone") || "UTC",
+  const deadlineLocalValue = String(
+    formData.get("countdownLocalTime") || "",
   ).trim();
+
+  const countdownTimeZone = await getShopScheduleTimeZone(admin);
+
+  if (!countdownTimeZone) {
+    return {
+      error: "Store timezone is unavailable. Reload and try again.",
+    };
+  }
+
+  if (String(formData.get("countdownTimeZone") || "") !== countdownTimeZone) {
+    return {
+      error:
+        "The store timezone changed or this form is outdated. Reload before saving.",
+    };
+  }
 
   const countdownExpiredText =
     String(formData.get("countdownExpiredText") || "").trim() || "Expired!";
@@ -154,25 +179,21 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: "Please choose valid six-digit hex colors." };
   }
 
-  // Require an explicit UTC marker or offset.
-  // The admin form will convert the browser-local input to ISO UTC.
-  if (!/(Z|[+-]\d{2}:\d{2})$/i.test(deadlineValue)) {
-    return { error: "Please enter a valid deadline with a timezone." };
+  const deadlineResult = parseScheduleInputPreservingInstant(
+    deadlineLocalValue,
+    countdownTimeZone,
+    existingCountdown?.countdownEndsAt,
+  );
+
+  if (!deadlineResult.ok) {
+    return { error: deadlineResult.error };
   }
 
-  const countdownEndsAt = new Date(deadlineValue);
-
-  if (Number.isNaN(countdownEndsAt.getTime())) {
-    return { error: "Please enter a valid Countdown deadline." };
+  if (!deadlineResult.date) {
+    return { error: "Please enter a Countdown deadline." };
   }
 
-  try {
-    new Intl.DateTimeFormat("en", {
-      timeZone: countdownTimeZone,
-    }).format(countdownEndsAt);
-  } catch {
-    return { error: "The Countdown timezone is invalid." };
-  }
+  const countdownEndsAt = deadlineResult.date;
 
   const offsets = [countdownDesktopOffset, countdownMobileOffset];
 
@@ -308,18 +329,9 @@ const countdownInputStyle = {
   font: "inherit",
 };
 
-function toLocalDateInput(date: Date) {
-  const pad = (value: number) => String(value).padStart(2, "0");
-
-  return (
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-` +
-    `${pad(date.getDate())}T${pad(date.getHours())}:` +
-    `${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  );
-}
-
 export default function CountdownPage() {
-  const { countdowns, editingCountdown, plan } = useLoaderData<typeof loader>();
+  const { countdowns, editingCountdown, plan, storeTimeZone } =
+    useLoaderData<typeof loader>();
 
   const actionData = useActionData<typeof action>();
   const location = useLocation();
@@ -341,8 +353,8 @@ export default function CountdownPage() {
   );
 
   const [deadlineLocal, setDeadlineLocal] = useState("");
-  const [timeZone, setTimeZone] = useState("UTC");
-  const [ready, setReady] = useState(false);
+  const [timeZone] = useState(storeTimeZone);
+  const ready = Boolean(timeZone);
 
   const storedDeadline = editingCountdown?.countdownEndsAt
     ? new Date(editingCountdown.countdownEndsAt).toISOString()
@@ -355,23 +367,29 @@ export default function CountdownPage() {
   }, [currentMutationSignal]);
 
   useEffect(() => {
-    setTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+    if (!timeZone) return;
 
     const deadline = storedDeadline
       ? new Date(storedDeadline)
       : new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    setDeadlineLocal(toLocalDateInput(deadline));
-    setReady(true);
-  }, [storedDeadline, editorResetKey]);
+    setDeadlineLocal(toScheduleInput(deadline, timeZone));
+  }, [storedDeadline, editorResetKey, timeZone]);
 
   let deadlineISO = "";
+  let deadlineError = "";
 
-  if (deadlineLocal) {
-    const parsedDeadline = new Date(deadlineLocal);
+  if (deadlineLocal && timeZone) {
+    const parsedDeadline = parseScheduleInputPreservingInstant(
+      deadlineLocal,
+      timeZone,
+      storedDeadline,
+    );
 
-    if (!Number.isNaN(parsedDeadline.getTime())) {
-      deadlineISO = parsedDeadline.toISOString();
+    if (parsedDeadline.ok) {
+      deadlineISO = parsedDeadline.date?.toISOString() ?? "";
+    } else {
+      deadlineError = parsedDeadline.error;
     }
   }
 
@@ -406,10 +424,7 @@ export default function CountdownPage() {
                 : "We could not verify your current plan. Refresh to retry. Draft saves and deletion remain available; additional Active saves require successful server-side plan verification."}
           </s-banner>
 
-          <Form
-            method="post"
-            key={editorResetKey}
-          >
+          <Form method="post" key={editorResetKey}>
             <input
               type="hidden"
               name="_action"
@@ -426,7 +441,11 @@ export default function CountdownPage() {
 
             <input type="hidden" name="countdownEndsAt" value={deadlineISO} />
 
-            <input type="hidden" name="countdownTimeZone" value={timeZone} />
+            <input
+              type="hidden"
+              name="countdownTimeZone"
+              value={timeZone ?? ""}
+            />
 
             <div
               style={{
@@ -462,9 +481,11 @@ export default function CountdownPage() {
               <label>
                 Deadline date and time
                 <input
+                  name="countdownLocalTime"
                   type="datetime-local"
                   step={1}
                   required
+                  disabled={!ready}
                   value={deadlineLocal}
                   onChange={(event) => setDeadlineLocal(event.target.value)}
                   style={countdownInputStyle}
@@ -472,12 +493,16 @@ export default function CountdownPage() {
               </label>
 
               <p>
-                {ready
-                  ? `Enter the deadline in your browser timezone: ${timeZone}.`
-                  : "Loading your browser timezone…"}{" "}
-                The deadline is stored as a UTC instant. Editing it displays
-                that same instant in your current browser timezone.
+                {timeZone
+                  ? `Enter the deadline in your store timezone: ${timeZone}. The deadline is stored as a UTC instant.`
+                  : "Store timezone is unavailable. Reload before saving."}
               </p>
+
+              {deadlineError ? (
+                <p role="alert" style={{ color: "#8e1f0b" }}>
+                  {deadlineError}
+                </p>
+              ) : null}
 
               <div
                 style={{
@@ -670,9 +695,13 @@ export default function CountdownPage() {
                 <p style={{ margin: 0 }}>
                   Deadline:{" "}
                   {countdown.countdownEndsAt
-                    ? new Date(countdown.countdownEndsAt).toISOString()
-                    : "Not set"}{" "}
-                  — UTC
+                    ? storeTimeZone
+                      ? formatSchedule(
+                          countdown.countdownEndsAt,
+                          storeTimeZone,
+                        )
+                      : "Store timezone unavailable"
+                    : "Not set"}
                 </p>
                 <CountdownPreview
                   deadlineISO={

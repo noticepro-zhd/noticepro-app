@@ -37,6 +37,12 @@ import { readTargetingForm } from "../features/widgets/targeting.shared";
 import { readCountryTargetingForm } from "../features/widgets/country-targeting.shared";
 import WidgetCountryTargetingFields from "../features/widgets/WidgetCountryTargetingFields";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
+import { getShopScheduleTimeZone } from "../features/widgets/scheduling.server";
+import {
+  formatSchedule,
+  parseScheduleInputPreservingInstant,
+  toScheduleInput,
+} from "../features/widgets/scheduling.shared";
 
 const DISPATCH_EXAMPLE =
   "Made to order. Usually dispatches within 1–2 business days.";
@@ -73,6 +79,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     notices,
     editingNotice,
     plan,
+    storeTimeZone: await getShopScheduleTimeZone(admin),
   };
 }
 
@@ -108,11 +115,7 @@ export async function action({ request }: ActionFunctionArgs) {
         ? new URLSearchParams({ edit: editId })
         : undefined;
 
-    return redirectWithSuccessToast(
-      "notice",
-      "deleted",
-      preservedSearchParams,
-    );
+    return redirectWithSuccessToast("notice", "deleted", preservedSearchParams);
   }
 
   const name = String(formData.get("name") || "").trim();
@@ -125,9 +128,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const dismissible = formData.get("dismissible") === "on";
   const submittedNoticeKind = formData.get("noticeKind");
   const noticeKind =
-    submittedNoticeKind === null
-      ? NOTICE_KINDS.GENERAL
-      : submittedNoticeKind;
+    submittedNoticeKind === null ? NOTICE_KINDS.GENERAL : submittedNoticeKind;
 
   if (!name) {
     return {
@@ -170,6 +171,55 @@ export async function action({ request }: ActionFunctionArgs) {
       };
     }
   }
+
+  const scheduleTimeZone = await getShopScheduleTimeZone(admin);
+
+  if (!scheduleTimeZone) {
+    return {
+      error: "Store timezone is unavailable. Reload and try again.",
+    };
+  }
+
+  if (
+    String(formData.get("scheduleTimeZone") || "") !== scheduleTimeZone ||
+    !formData.has("startsAt") ||
+    !formData.has("endsAt")
+  ) {
+    return {
+      error:
+        "The store timezone changed or this form is outdated. Reload before saving.",
+    };
+  }
+
+  const startResult = parseScheduleInputPreservingInstant(
+    String(formData.get("startsAt") || "").trim(),
+    scheduleTimeZone,
+    existingNotice?.startsAt,
+  );
+
+  if (!startResult.ok) {
+    return { error: `Start time: ${startResult.error}` };
+  }
+
+  const endResult = parseScheduleInputPreservingInstant(
+    String(formData.get("endsAt") || "").trim(),
+    scheduleTimeZone,
+    existingNotice?.endsAt,
+  );
+
+  if (!endResult.ok) {
+    return { error: `End time: ${endResult.error}` };
+  }
+
+  const startsAt = startResult.date;
+  const endsAt = endResult.date;
+
+  if (startsAt && endsAt && endsAt <= startsAt) {
+    return {
+      error: "The end date must be after the start date.",
+    };
+  }
+
   const targeting = readTargetingForm(formData);
 
   if (!targeting.ok) {
@@ -185,10 +235,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: targetingVerification.error };
   }
 
-  const countryTargeting = readCountryTargetingForm(
-    formData,
-    existingNotice,
-  );
+  const countryTargeting = readCountryTargetingForm(formData, existingNotice);
 
   if (!countryTargeting.ok) {
     return {
@@ -241,6 +288,8 @@ export async function action({ request }: ActionFunctionArgs) {
     backgroundColor,
     textColor,
     dismissible,
+    startsAt,
+    endsAt,
   };
 
   if (actionType === "update") {
@@ -309,10 +358,12 @@ function NoticePageContent({
   notices,
   editingNotice,
   plan,
+  storeTimeZone,
   actionError,
   countryTargetingError,
 }: NoticePageContentProps) {
   const [editorNotice] = useState(editingNotice);
+  const [scheduleTimeZone] = useState(storeTimeZone);
   const isEditing = Boolean(editorNotice);
   const [message, setMessage] = useState(editorNotice?.message ?? "");
   const [noticeKind, setNoticeKind] = useState(
@@ -509,6 +560,81 @@ function NoticePageContent({
                 label="Allow visitors to close the notice"
                 defaultChecked={editorNotice?.dismissible ?? true}
               />
+              <input
+                type="hidden"
+                name="scheduleTimeZone"
+                value={scheduleTimeZone ?? ""}
+              />
+
+              <p style={{ margin: 0 }}>
+                {scheduleTimeZone
+                  ? `Optional schedule. Enter times in your store timezone: ${scheduleTimeZone}. Leave both fields empty for no schedule limits.`
+                  : "Store timezone is unavailable. Reload before saving."}
+              </p>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                  gap: "16px",
+                }}
+              >
+                <label>
+                  Starts at, optional
+                  <input
+                    name="startsAt"
+                    type="datetime-local"
+                    step={1}
+                    disabled={!scheduleTimeZone}
+                    defaultValue={
+                      scheduleTimeZone
+                        ? toScheduleInput(
+                            editorNotice?.startsAt,
+                            scheduleTimeZone,
+                          )
+                        : ""
+                    }
+                    style={{
+                      display: "block",
+                      boxSizing: "border-box",
+                      width: "100%",
+                      marginTop: "6px",
+                      padding: "10px",
+                      border: "1px solid #8c9196",
+                      borderRadius: "8px",
+                      font: "inherit",
+                    }}
+                  />
+                </label>
+
+                <label>
+                  Ends at, optional
+                  <input
+                    name="endsAt"
+                    type="datetime-local"
+                    step={1}
+                    disabled={!scheduleTimeZone}
+                    defaultValue={
+                      scheduleTimeZone
+                        ? toScheduleInput(
+                            editorNotice?.endsAt,
+                            scheduleTimeZone,
+                          )
+                        : ""
+                    }
+                    style={{
+                      display: "block",
+                      boxSizing: "border-box",
+                      width: "100%",
+                      marginTop: "6px",
+                      padding: "10px",
+                      border: "1px solid #8c9196",
+                      borderRadius: "8px",
+                      font: "inherit",
+                    }}
+                  />
+                </label>
+              </div>
               <WidgetTargetingFields
                 initialValue={{
                   targetingMode:
@@ -592,6 +718,39 @@ function NoticePageContent({
                 </div>
 
                 <p style={{ margin: 0 }}>{notice.message}</p>
+
+                {notice.startsAt || notice.endsAt ? (
+                  <div
+                    style={{
+                      padding: "12px",
+                      backgroundColor: "#f3f4f6",
+                      color: "#111827",
+                      borderRadius: "8px",
+                    }}
+                  >
+                    <strong>
+                      Schedule ({storeTimeZone ?? "timezone unavailable"})
+                    </strong>
+
+                    <p style={{ margin: "6px 0 0" }}>
+                      Starts:{" "}
+                      {notice.startsAt
+                        ? storeTimeZone
+                          ? formatSchedule(notice.startsAt, storeTimeZone)
+                          : "Store timezone unavailable"
+                        : "No start limit"}
+                    </p>
+
+                    <p style={{ margin: "4px 0 0" }}>
+                      Ends:{" "}
+                      {notice.endsAt
+                        ? storeTimeZone
+                          ? formatSchedule(notice.endsAt, storeTimeZone)
+                          : "Store timezone unavailable"
+                        : "No end limit"}
+                    </p>
+                  </div>
+                ) : null}
 
                 <div>
                   <strong>Storefront preview</strong>

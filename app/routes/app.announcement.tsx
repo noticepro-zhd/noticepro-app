@@ -36,35 +36,13 @@ import { readTargetingForm } from "../features/widgets/targeting.shared";
 import { readCountryTargetingForm } from "../features/widgets/country-targeting.shared";
 import WidgetCountryTargetingFields from "../features/widgets/WidgetCountryTargetingFields";
 import { verifyTargetingSelection } from "../features/widgets/targeting.server";
-function toDateTimeLocal(value: Date | null | undefined) {
-  if (!value) return "";
+import { getShopScheduleTimeZone } from "../features/widgets/scheduling.server";
 
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  const hours = String(value.getHours()).padStart(2, "0");
-  const minutes = String(value.getMinutes()).padStart(2, "0");
-
-  return `${year}-${month}-${day}T${hours}:${minutes}`;
-}
-
-function formatScheduleUtc(value: Date | string | null | undefined) {
-  if (!value) return "";
-
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) return "Invalid saved date";
-
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: "UTC",
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).format(date);
-}
+import {
+  formatSchedule,
+  parseScheduleInputPreservingInstant,
+  toScheduleInput,
+} from "../features/widgets/scheduling.shared";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -98,6 +76,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     widgets,
     editingWidget,
     plan,
+    storeTimeZone: await getShopScheduleTimeZone(admin),
   };
 }
 
@@ -142,20 +121,61 @@ export async function action({ request }: ActionFunctionArgs) {
   const startsAtValue = String(formData.get("startsAt") || "").trim();
   const endsAtValue = String(formData.get("endsAt") || "").trim();
 
-  const startsAt = startsAtValue ? new Date(startsAtValue) : null;
-  const endsAt = endsAtValue ? new Date(endsAtValue) : null;
+  const scheduleTimeZone = await getShopScheduleTimeZone(admin);
+  const submittedScheduleTimeZone = String(
+    formData.get("scheduleTimeZone") || "",
+  );
 
-  if (startsAt && Number.isNaN(startsAt.getTime())) {
+  if (!scheduleTimeZone) {
     return {
-      error: "Please enter a valid start date and time.",
+      error: "Store timezone is unavailable. Reload and try again.",
     };
   }
 
-  if (endsAt && Number.isNaN(endsAt.getTime())) {
+  if (submittedScheduleTimeZone !== scheduleTimeZone) {
     return {
-      error: "Please enter a valid end date and time.",
+      error:
+        "The store timezone changed or this form is outdated. Reload before saving.",
     };
   }
+
+  const savedScheduleWidget =
+    actionType === "update" && widgetId
+      ? await db.widget.findFirst({
+          where: widgetIdScope(
+            session.shop,
+            WIDGET_TYPES.ANNOUNCEMENT,
+            widgetId,
+          ),
+        })
+      : null;
+
+  if (actionType === "update" && !savedScheduleWidget) {
+    return { error: "The widget could not be found." };
+  }
+
+  const startResult = parseScheduleInputPreservingInstant(
+    startsAtValue,
+    scheduleTimeZone,
+    savedScheduleWidget?.startsAt,
+  );
+
+  if (!startResult.ok) {
+    return { error: `Start time: ${startResult.error}` };
+  }
+
+  const endResult = parseScheduleInputPreservingInstant(
+    endsAtValue,
+    scheduleTimeZone,
+    savedScheduleWidget?.endsAt,
+  );
+
+  if (!endResult.ok) {
+    return { error: `End time: ${endResult.error}` };
+  }
+
+  const startsAt = startResult.date;
+  const endsAt = endResult.date;
 
   if (startsAt && endsAt && endsAt <= startsAt) {
     return {
@@ -212,10 +232,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return { error: targetingVerification.error };
   }
 
-  const countryTargeting = readCountryTargetingForm(
-    formData,
-    existingWidget,
-  );
+  const countryTargeting = readCountryTargetingForm(formData, existingWidget);
 
   if (!countryTargeting.ok) {
     return {
@@ -298,7 +315,14 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function AppHome() {
-  const { widgets, editingWidget, plan } = useLoaderData<typeof loader>();
+  const {
+    widgets,
+    editingWidget,
+    plan,
+    storeTimeZone: loadedStoreTimeZone,
+  } = useLoaderData<typeof loader>();
+
+  const [storeTimeZone] = useState(loadedStoreTimeZone);
 
   const actionData = useActionData<typeof action>();
   const location = useLocation();
@@ -362,10 +386,7 @@ export default function AppHome() {
                 : "We could not verify your current plan. Refresh to retry. Draft saves and deletion remain available; additional Active saves require successful server-side plan verification."}
           </s-banner>
 
-          <Form
-            method="post"
-            key={editorResetKey}
-          >
+          <Form method="post" key={editorResetKey}>
             <input
               type="hidden"
               name="_action"
@@ -506,8 +527,16 @@ export default function AppHome() {
                 <s-option value="ACTIVE">Active</s-option>
               </s-select>
 
+              <input
+                type="hidden"
+                name="scheduleTimeZone"
+                value={storeTimeZone ?? ""}
+              />
+
               <p style={{ margin: 0 }}>
-                Optional schedule. Times use your store server’s local timezone.
+                {storeTimeZone
+                  ? `Optional schedule. Enter times in your store timezone: ${storeTimeZone}.`
+                  : "Store timezone is unavailable. Reload before saving."}
               </p>
 
               <div
@@ -522,7 +551,16 @@ export default function AppHome() {
                   <input
                     name="startsAt"
                     type="datetime-local"
-                    defaultValue={toDateTimeLocal(editingWidget?.startsAt)}
+                    step={1}
+                    disabled={!storeTimeZone}
+                    defaultValue={
+                      storeTimeZone
+                        ? toScheduleInput(
+                            editingWidget?.startsAt,
+                            storeTimeZone,
+                          )
+                        : ""
+                    }
                     style={{
                       display: "block",
                       boxSizing: "border-box",
@@ -540,7 +578,13 @@ export default function AppHome() {
                   <input
                     name="endsAt"
                     type="datetime-local"
-                    defaultValue={toDateTimeLocal(editingWidget?.endsAt)}
+                    step={1}
+                    disabled={!storeTimeZone}
+                    defaultValue={
+                      storeTimeZone
+                        ? toScheduleInput(editingWidget?.endsAt, storeTimeZone)
+                        : ""
+                    }
                     style={{
                       display: "block",
                       boxSizing: "border-box",
@@ -616,19 +660,25 @@ export default function AppHome() {
                       borderRadius: "8px",
                     }}
                   >
-                    <strong>Schedule (UTC)</strong>
+                    <strong>
+                      Schedule ({storeTimeZone ?? "timezone unavailable"})
+                    </strong>
 
                     <p style={{ margin: "6px 0 0" }}>
                       Starts:{" "}
                       {widget.startsAt
-                        ? formatScheduleUtc(widget.startsAt)
+                        ? storeTimeZone
+                          ? formatSchedule(widget.startsAt, storeTimeZone)
+                          : "Store timezone unavailable"
                         : "No start limit"}
                     </p>
 
                     <p style={{ margin: "4px 0 0" }}>
                       Ends:{" "}
                       {widget.endsAt
-                        ? formatScheduleUtc(widget.endsAt)
+                        ? storeTimeZone
+                          ? formatSchedule(widget.endsAt, storeTimeZone)
+                          : "Store timezone unavailable"
                         : "No end limit"}
                     </p>
                   </div>

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import * as schedulingShared from "../app/features/widgets/scheduling.shared.ts";
 import test from "node:test";
 import fs from "node:fs";
 import vm from "node:vm";
@@ -29,10 +30,16 @@ import {
   getWidgetEditorResetKey,
 } from "../app/features/widgets/widget-editor-reset.ts";
 import { redirectWithSuccessToast } from "../app/features/widgets/success-toast.server.ts";
-import { activeWidgetLimitForPlan, canActivateAnotherWidget } from "../app/features/billing/plan-policy.server.ts";
+import {
+  activeWidgetLimitForPlan,
+  canActivateAnotherWidget,
+} from "../app/features/billing/plan-policy.server.ts";
 
 function loadActualRoute(relativePath, mocks) {
-  const source = fs.readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  const source = fs.readFileSync(
+    new URL(relativePath, import.meta.url),
+    "utf8",
+  );
   const output = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -60,16 +67,23 @@ function loadActualRoute(relativePath, mocks) {
 
   const requireMock = (specifier) => {
     if (specifier === "react-router") {
-      return mocks["react-router"] ?? {
-        Form: () => null,
-        Link: () => null,
-        useActionData: () => null,
-        useLoaderData: () => null,
-        useLocation: () => ({ key: "test" }),
-      };
+      return (
+        mocks["react-router"] ?? {
+          Form: () => null,
+          Link: () => null,
+          useActionData: () => null,
+          useLoaderData: () => null,
+          useLocation: () => ({ key: "test" }),
+        }
+      );
     }
     if (specifier === "react") {
-      return mocks.react ?? { useEffect: () => {}, useState: (value) => [value, () => {}] };
+      return (
+        mocks.react ?? {
+          useEffect: () => {},
+          useState: (value) => [value, () => {}],
+        }
+      );
     }
     if (specifier === "react/jsx-runtime") {
       return {
@@ -87,6 +101,19 @@ function loadActualRoute(relativePath, mocks) {
         resolveVisitorCountry,
         ...mocks[specifier],
       };
+    }
+    if (
+      specifier === "../features/widgets/scheduling.shared" ||
+      specifier === "./scheduling.shared"
+    ) {
+      return schedulingShared;
+    }
+
+    if (specifier === "../features/widgets/scheduling.server") {
+      return (
+        mocks[specifier] ??
+        loadActualRoute("../app/features/widgets/scheduling.server.ts", mocks)
+      );
     }
     if (Object.prototype.hasOwnProperty.call(mocks, specifier)) {
       return mocks[specifier];
@@ -115,17 +142,42 @@ function makeDb() {
   };
 }
 
-function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = { ok: true } } = {}) {
+function makeAdminMocks({
+  db,
+  shop = "shop.test",
+  plan = "FREE",
+  verification = { ok: true },
+} = {}) {
   const state = {
     plan,
     verification,
     planCalls: 0,
     planError: null,
+    timeZone: "UTC",
+    timeZoneError: null,
   };
+  const scheduleAdmin = {
+    graphql: async (query) => {
+      assert.match(query, /ianaTimezone/);
+
+      if (state.timeZoneError) {
+        throw state.timeZoneError;
+      }
+
+      return Response.json({
+        data: {
+          shop: {
+            ianaTimezone: state.timeZone,
+          },
+        },
+      });
+    },
+  };
+
   const authenticate = {
     admin: async () => ({
       session: { shop },
-      admin: {},
+      admin: scheduleAdmin,
     }),
     public: {
       appProxy: async () => ({ session: { shop }, admin: {} }),
@@ -136,7 +188,11 @@ function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = 
     "../db.server": { __esModule: true, default: db },
     "../features/widgets/widget.constants": {
       WIDGET_STATUSES: { DRAFT: "DRAFT", ACTIVE: "ACTIVE" },
-      WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+      WIDGET_TYPES: {
+        ANNOUNCEMENT: "ANNOUNCEMENT",
+        NOTICE: "NOTICE",
+        COUNTDOWN: "COUNTDOWN",
+      },
       NOTICE_KINDS: { GENERAL: "GENERAL", DISPATCH: "DISPATCH" },
     },
     "../features/widgets/widget.server": {
@@ -177,10 +233,22 @@ function makeAdminMocks({ db, shop = "shop.test", plan = "FREE", verification = 
     "../features/widgets/targeting.server": {
       verifyTargetingSelection: async () => state.verification,
     },
-    "../components/LoadingSubmitButton": { __esModule: true, default: () => null },
-    "../features/widgets/WidgetTargetingFields": { __esModule: true, default: () => null },
-    "../features/widgets/WidgetCountryTargetingFields": { __esModule: true, default: () => null },
-    "../features/widgets/CountdownPreview": { __esModule: true, default: () => null },
+    "../components/LoadingSubmitButton": {
+      __esModule: true,
+      default: () => null,
+    },
+    "../features/widgets/WidgetTargetingFields": {
+      __esModule: true,
+      default: () => null,
+    },
+    "../features/widgets/WidgetCountryTargetingFields": {
+      __esModule: true,
+      default: () => null,
+    },
+    "../features/widgets/CountdownPreview": {
+      __esModule: true,
+      default: () => null,
+    },
     "../features/widgets/notice-editor-reset": {
       getNoticeEditorMutationSignal,
       getNoticeEditorResetKey,
@@ -206,7 +274,31 @@ function form(entries) {
 }
 
 async function actionRequest(entries, url = "https://shop.test/app/test") {
-  const data = form(entries);
+  // Existing non-scheduling tests simulate the current form fields.
+  // Missing-field/security tests must use a raw Request instead.
+  const fields = {
+    scheduleTimeZone: "UTC",
+    startsAt: "",
+    endsAt: "",
+    ...entries,
+  };
+
+  if (
+    Object.prototype.hasOwnProperty.call(fields, "countdownEndsAt") &&
+    !Object.prototype.hasOwnProperty.call(fields, "countdownLocalTime")
+  ) {
+    const oldDeadline = new Date(fields.countdownEndsAt);
+
+    fields.countdownLocalTime = Number.isNaN(oldDeadline.getTime())
+      ? String(fields.countdownEndsAt)
+      : schedulingShared.toScheduleInput(
+          oldDeadline,
+          fields.countdownTimeZone || "UTC",
+        );
+  }
+
+  const data = form(fields);
+
   return new Request(url, {
     method: "POST",
     body: data,
@@ -245,7 +337,9 @@ test("country challenge route requires app-proxy auth and exposes no signing sec
     mocks,
   );
   const response = await route.loader({
-    request: new Request("https://storefront.test/apps/noticepro/country-challenge"),
+    request: new Request(
+      "https://storefront.test/apps/noticepro/country-challenge",
+    ),
   });
   const body = await response.json();
 
@@ -279,24 +373,35 @@ test("country challenge route requires app-proxy auth and exposes no signing sec
 
 test("actual admin routes scope create/update, clear selections, and reject invalid writes", async () => {
   for (const [path, type, required] of [
-    ["../app/routes/app.announcement.tsx", "ANNOUNCEMENT", {
-      name: "Sale",
-      message: "Sale now",
-      targetingMode: "ALL",
-      targetProductIds: JSON.stringify(["gid://shopify/Product/1"]),
-      targetCollectionIds: JSON.stringify(["gid://shopify/Collection/1"]),
-    }],
-    ["../app/routes/app.notice.tsx", "NOTICE", {
-      name: "Notice",
-      message: "Important",
-      targetingMode: "ALL",
-      targetProductIds: JSON.stringify(["gid://shopify/Product/1"]),
-      targetCollectionIds: JSON.stringify(["gid://shopify/Collection/1"]),
-    }],
+    [
+      "../app/routes/app.announcement.tsx",
+      "ANNOUNCEMENT",
+      {
+        name: "Sale",
+        message: "Sale now",
+        targetingMode: "ALL",
+        targetProductIds: JSON.stringify(["gid://shopify/Product/1"]),
+        targetCollectionIds: JSON.stringify(["gid://shopify/Collection/1"]),
+      },
+    ],
+    [
+      "../app/routes/app.notice.tsx",
+      "NOTICE",
+      {
+        name: "Notice",
+        message: "Important",
+        targetingMode: "ALL",
+        targetProductIds: JSON.stringify(["gid://shopify/Product/1"]),
+        targetCollectionIds: JSON.stringify(["gid://shopify/Collection/1"]),
+      },
+    ],
   ]) {
     const db = makeDb();
     let created;
-    db.widget.create = async (args) => { created = args; return args; };
+    db.widget.create = async (args) => {
+      created = args;
+      return args;
+    };
     db.widget.findFirst = async ({ where }) => {
       if (where.id) return { id: "w1", status: "DRAFT" };
       return null;
@@ -322,7 +427,11 @@ test("actual admin routes scope create/update, clear selections, and reject inva
     assert.deepEqual(created.data.targetCollectionIds, []);
 
     db.widget.updateMany = async (args) => {
-      assert.deepEqual(args.where, { shopDomain: "shop-a.test", type, id: "w1" });
+      assert.deepEqual(args.where, {
+        shopDomain: "shop-a.test",
+        type,
+        id: "w1",
+      });
       return { count: 1 };
     };
     await route.action({
@@ -509,14 +618,18 @@ test("actual Notice route persists Dispatch, reopens it, and preserves message a
   });
   assert.equal(switchedReload.editingNotice.noticeKind, "GENERAL");
   assert.equal(switchedReload.editingNotice.message, editedMessage);
-  assert.deepEqual(switchedReload.editingNotice.targetCollectionIds, [collectionId]);
+  assert.deepEqual(switchedReload.editingNotice.targetCollectionIds, [
+    collectionId,
+  ]);
 });
 
 test("actual Notice route rejects invalid kinds without writes and shares the Free Active limit", async () => {
   const db = makeDb();
   let writes = 0;
   let countWhere;
-  db.widget.create = async () => { writes += 1; };
+  db.widget.create = async () => {
+    writes += 1;
+  };
   const existingGeneralActive = {
     shopDomain: "shop-a.test",
     type: "NOTICE",
@@ -661,7 +774,11 @@ test("Dispatch storefront output reuses Notice targeting, keeps its proxy shape,
     "../db.server": { __esModule: true, default: db },
     "../features/widgets/widget.constants": {
       WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
-      WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+      WIDGET_TYPES: {
+        ANNOUNCEMENT: "ANNOUNCEMENT",
+        NOTICE: "NOTICE",
+        COUNTDOWN: "COUNTDOWN",
+      },
     },
     "../features/widgets/widget.server": {
       widgetScope: (shop, type) => ({ shopDomain: shop, type }),
@@ -832,7 +949,10 @@ test("Notice editor reset identity is scoped to destination and its successful m
   const afterUnrelatedUpdate = await load();
   assert.equal(editorKey(afterUnrelatedUpdate), initialCreateKey);
 
-  rows.splice(rows.findIndex((row) => row.id === "external-create"), 1);
+  rows.splice(
+    rows.findIndex((row) => row.id === "external-create"),
+    1,
+  );
   const afterUnrelatedDelete = await load();
   assert.equal(editorKey(afterUnrelatedDelete), initialCreateKey);
 
@@ -896,7 +1016,10 @@ test("Notice editor reset identity is scoped to destination and its successful m
     "2026-11-23T12:03:00.000Z",
   );
   rows.push(makeNotice("concurrent-create", "2026-11-23T12:04:00.000Z"));
-  rows.splice(rows.findIndex((row) => row.id === "c"), 1);
+  rows.splice(
+    rows.findIndex((row) => row.id === "c"),
+    1,
+  );
   assert.equal(
     editorKey(await load("?edit=a"), createSignal),
     beforeFailedEditKey,
@@ -943,7 +1066,10 @@ test("Notice editor reset identity is scoped to destination and its successful m
   assert.ok(updateSignal);
   assert.notEqual(editorKey(createAfterEdit, updateSignal), editingAKey);
   assert.equal(createAfterEdit.editingNotice, null);
-  assert.equal(rows.find((row) => row.id === "a").message, "Saved custom message");
+  assert.equal(
+    rows.find((row) => row.id === "a").message,
+    "Saved custom message",
+  );
   assert.equal(rows.find((row) => row.id === "a").noticeKind, "DISPATCH");
   const reopened = await load("?edit=a");
   assert.equal(reopened.editingNotice.message, "Saved custom message");
@@ -964,14 +1090,23 @@ test("success toast redirects preserve editor destination and toast parameters",
 
   assert.equal(destination.pathname, "/app/notice");
   assert.equal(destination.searchParams.get("edit"), "notice-a");
-  assert.equal(destination.searchParams.get("noticeproToast"), "notice.deleted");
-  assert.match(destination.searchParams.get("noticeproToastId") ?? "", /^[\da-f-]{36}$/i);
+  assert.equal(
+    destination.searchParams.get("noticeproToast"),
+    "notice.deleted",
+  );
+  assert.match(
+    destination.searchParams.get("noticeproToastId") ?? "",
+    /^[\da-f-]{36}$/i,
+  );
 });
 
 test("actual countdown route validates, persists countdown fields, and allows already-Active expired edits", async () => {
   const db = makeDb();
   let created;
-  db.widget.create = async (args) => { created = args; return args; };
+  db.widget.create = async (args) => {
+    created = args;
+    return args;
+  };
   db.widget.findFirst = async () => ({ id: "c1", status: "ACTIVE" });
   const { mocks } = makeAdminMocks({ db, shop: "shop-a.test" });
   const route = loadActualRoute("../app/routes/app.countdown.tsx", mocks);
@@ -1034,8 +1169,14 @@ test("actual countdown checkbox contract persists checked and unchecked create/u
   db.widget.findFirst = async () => ({ id: "c1", status: "DRAFT" });
   let createdData;
   let updatedData;
-  db.widget.create = async (args) => { createdData = args.data; return args; };
-  db.widget.updateMany = async (args) => { updatedData = args.data; return { count: 1 }; };
+  db.widget.create = async (args) => {
+    createdData = args.data;
+    return args;
+  };
+  db.widget.updateMany = async (args) => {
+    updatedData = args.data;
+    return { count: 1 };
+  };
   const { mocks } = makeAdminMocks({ db });
   const route = loadActualRoute("../app/routes/app.countdown.tsx", mocks);
 
@@ -1214,7 +1355,10 @@ test("actual Announcement, Notice, and Countdown actions persist and validate co
       ),
     });
     assert.match(invalidSelection.error, /Select at least one country/);
-    assert.equal(invalidSelection.countryTargetingError, invalidSelection.error);
+    assert.equal(
+      invalidSelection.countryTargetingError,
+      invalidSelection.error,
+    );
     assert.equal(created.length + updates.length, writesBeforeInvalid);
 
     db.widget.count = async () => 1;
@@ -1415,16 +1559,16 @@ test("Announcement and Countdown editor identities preserve errors and reset on 
   ];
 
   for (const { solution, source } of routes) {
-    const createSearch =
-      `?noticeproToast=${solution}.created&noticeproToastId=create-1`;
+    const createSearch = `?noticeproToast=${solution}.created&noticeproToastId=create-1`;
     const initialKey = getWidgetEditorResetKey(null, null);
-    const createSignal = getWidgetEditorMutationSignal(
-      createSearch,
-      solution,
-    );
+    const createSignal = getWidgetEditorMutationSignal(createSearch, solution);
     const successfulCreateKey = getWidgetEditorResetKey(null, createSignal);
 
-    assert.notEqual(successfulCreateKey, initialKey, `${solution} fresh create`);
+    assert.notEqual(
+      successfulCreateKey,
+      initialKey,
+      `${solution} fresh create`,
+    );
     assert.equal(
       getWidgetEditorMutationSignal("", solution, createSignal),
       createSignal,
@@ -1454,13 +1598,19 @@ test("Announcement and Countdown editor identities preserve errors and reset on 
       `${solution} edit destination changes reset identity`,
     );
     assert.match(source, /key=\{editorResetKey\}/);
-    assert.doesNotMatch(source, /key=\{`\$\{editing(?:Widget|Countdown).+location\.key/);
+    assert.doesNotMatch(
+      source,
+      /key=\{`\$\{editing(?:Widget|Countdown).+location\.key/,
+    );
   }
 
   const countdownSource = routes.find(
     ({ solution }) => solution === "countdown",
   ).source;
-  assert.match(countdownSource, /\}, \[storedDeadline, editorResetKey\]\)/);
+  assert.match(
+    countdownSource,
+    /\}, \[storedDeadline, editorResetKey, timeZone\]\)/,
+  );
 });
 
 test("actual admin routes reject verification/status/action failures and zero-count delete/update", async () => {
@@ -1470,11 +1620,16 @@ test("actual admin routes reject verification/status/action failures and zero-co
   ]) {
     const db = makeDb();
     let writes = 0;
-    db.widget.create = async () => { writes += 1; };
+    db.widget.create = async () => {
+      writes += 1;
+    };
     db.widget.updateMany = async () => ({ count: 0 });
     db.widget.deleteMany = async () => ({ count: 0 });
     db.widget.findFirst = async () => ({ id: "foreign", status: "DRAFT" });
-    const { mocks, state } = makeAdminMocks({ db, verification: { ok: false, error: "verify failed" } });
+    const { mocks, state } = makeAdminMocks({
+      db,
+      verification: { ok: false, error: "verify failed" },
+    });
     const route = loadActualRoute(path, mocks);
     const base = {
       name: "Name",
@@ -1482,12 +1637,58 @@ test("actual admin routes reject verification/status/action failures and zero-co
       status: "DRAFT",
       targetingMode: "ALL",
     };
-    assert.match((await route.action({ request: await actionRequest({ _action: "bogus", ...base }) })).error, /Invalid/);
-    assert.match((await route.action({ request: await actionRequest({ ...base, _action: "create", status: "BAD" }) })).error, /Draft or Active/);
-    assert.match((await route.action({ request: await actionRequest({ _action: "create", ...base }) })).error, /verify failed/);
-    assert.match((await route.action({ request: await actionRequest({ _action: "update", widgetId: "w1", ...base }) })).error, /verify failed/);
+    assert.match(
+      (
+        await route.action({
+          request: await actionRequest({ _action: "bogus", ...base }),
+        })
+      ).error,
+      /Invalid/,
+    );
+    assert.match(
+      (
+        await route.action({
+          request: await actionRequest({
+            ...base,
+            _action: "create",
+            status: "BAD",
+          }),
+        })
+      ).error,
+      /Draft or Active/,
+    );
+    assert.match(
+      (
+        await route.action({
+          request: await actionRequest({ _action: "create", ...base }),
+        })
+      ).error,
+      /verify failed/,
+    );
+    assert.match(
+      (
+        await route.action({
+          request: await actionRequest({
+            _action: "update",
+            widgetId: "w1",
+            ...base,
+          }),
+        })
+      ).error,
+      /verify failed/,
+    );
     assert.equal(writes, 0);
-    assert.match((await route.action({ request: await actionRequest({ _action: "delete", widgetId: "foreign" }) })).error, /could not be found/i);
+    assert.match(
+      (
+        await route.action({
+          request: await actionRequest({
+            _action: "delete",
+            widgetId: "foreign",
+          }),
+        })
+      ).error,
+      /could not be found/i,
+    );
     db.widget.updateMany = async () => ({ count: 0 });
     state.verification = { ok: true };
   }
@@ -1527,18 +1728,28 @@ test("actual active gates preserve first Active bypass, Free/Pro, billing failur
       status: "ACTIVE",
       targetingMode: "ALL",
     };
-    assert.ok((await route.action({ request: await actionRequest(base) })).redirect);
+    assert.ok(
+      (await route.action({ request: await actionRequest(base) })).redirect,
+    );
     assert.equal(state.planCalls, 0);
 
     db.widget.count = async () => 1;
-    assert.match((await route.action({ request: await actionRequest(base) })).error, /Free plan allows one/);
+    assert.match(
+      (await route.action({ request: await actionRequest(base) })).error,
+      /Free plan allows one/,
+    );
     assert.equal(state.planCalls, 1);
 
     state.plan = "PRO";
-    assert.ok((await route.action({ request: await actionRequest(base) })).redirect);
+    assert.ok(
+      (await route.action({ request: await actionRequest(base) })).redirect,
+    );
 
     state.planError = new Error("billing unavailable");
-    assert.match((await route.action({ request: await actionRequest(base) })).error, /could not verify your plan/i);
+    assert.match(
+      (await route.action({ request: await actionRequest(base) })).error,
+      /could not verify your plan/i,
+    );
 
     state.planError = null;
     const draft = await route.action({
@@ -1550,9 +1761,19 @@ test("actual active gates preserve first Active bypass, Free/Pro, billing failur
 
 test("actual proxy loaders filter before display cap and keep exact legacy/multi shapes", async () => {
   const cases = [
-    ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements", "announcement"],
+    [
+      "../app/routes/api.proxy.announcement.ts",
+      "ANNOUNCEMENT",
+      "announcements",
+      "announcement",
+    ],
     ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices", "notice"],
-    ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns", "countdown"],
+    [
+      "../app/routes/api.proxy.countdown.ts",
+      "COUNTDOWN",
+      "countdowns",
+      "countdown",
+    ],
   ];
 
   for (const [path, type, plural, single] of cases) {
@@ -1631,17 +1852,27 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
       "../shopify.server": {
         authenticate: {
           public: {
-            appProxy: async () => ({ session: { shop: "shop.test" }, admin: {} }),
+            appProxy: async () => ({
+              session: { shop: "shop.test" },
+              admin: {},
+            }),
           },
         },
       },
       "../db.server": { __esModule: true, default: db },
       "../features/widgets/widget.constants": {
         WIDGET_STATUSES: { ACTIVE: "ACTIVE", DRAFT: "DRAFT" },
-        WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+        WIDGET_TYPES: {
+          ANNOUNCEMENT: "ANNOUNCEMENT",
+          NOTICE: "NOTICE",
+          COUNTDOWN: "COUNTDOWN",
+        },
       },
       "../features/widgets/widget.server": {
-        widgetScope: (shop, widgetType) => ({ shopDomain: shop, type: widgetType }),
+        widgetScope: (shop, widgetType) => ({
+          shopDomain: shop,
+          type: widgetType,
+        }),
       },
       "../features/billing/storefront-plan.server": {
         getStorefrontWidgetLimit: async () => 1,
@@ -1653,15 +1884,19 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
         readTargetingForm,
       },
       "../features/widgets/targeting.server": {
-        getCachedMatchingCollectionIds: async (_shop, _admin, _product, ids) => {
+        getCachedMatchingCollectionIds: async (
+          _shop,
+          _admin,
+          _product,
+          ids,
+        ) => {
           cacheCalls += 1;
           return ids.length ? ["gid://shopify/Collection/201"] : [];
         },
       },
     };
     const route = loadActualRoute(path, mocks);
-    const url =
-      `https://shop.test/apps/notice-pro?np_page=product&np_product=101&format=multi`;
+    const url = `https://shop.test/apps/notice-pro?np_page=product&np_product=101&format=multi`;
     const result = await route.loader({ request: new Request(url) });
     const body = await result.json();
 
@@ -1687,7 +1922,11 @@ test("actual proxy loaders filter before display cap and keep exact legacy/multi
 
 test("actual proxy loaders match countries after page/schedule targeting and before the cap", async () => {
   const cases = [
-    ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements"],
+    [
+      "../app/routes/api.proxy.announcement.ts",
+      "ANNOUNCEMENT",
+      "announcements",
+    ],
     ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices"],
     ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns"],
   ];
@@ -1764,7 +2003,10 @@ test("actual proxy loaders match countries after page/schedule targeting and bef
       "../shopify.server": {
         authenticate: {
           public: {
-            appProxy: async () => ({ session: { shop: "proxy.test" }, admin: {} }),
+            appProxy: async () => ({
+              session: { shop: "proxy.test" },
+              admin: {},
+            }),
           },
         },
       },
@@ -1778,7 +2020,10 @@ test("actual proxy loaders match countries after page/schedule targeting and bef
         },
       },
       "../features/widgets/widget.server": {
-        widgetScope: (shop, widgetType) => ({ shopDomain: shop, type: widgetType }),
+        widgetScope: (shop, widgetType) => ({
+          shopDomain: shop,
+          type: widgetType,
+        }),
       },
       "../features/billing/storefront-plan.server": {
         getStorefrontWidgetLimit: async () => 2,
@@ -1790,7 +2035,12 @@ test("actual proxy loaders match countries after page/schedule targeting and bef
         readTargetingForm,
       },
       "../features/widgets/targeting.server": {
-        getCachedMatchingCollectionIds: async (_shop, _admin, _product, ids) => {
+        getCachedMatchingCollectionIds: async (
+          _shop,
+          _admin,
+          _product,
+          ids,
+        ) => {
           collectionCalls += 1;
           return ids.length ? ["gid://shopify/Collection/201"] : [];
         },
@@ -1861,7 +2111,10 @@ test("actual proxy loaders match countries after page/schedule targeting and bef
     assert.equal(singleResponse.headers.get("Cache-Control"), "no-store");
     assert.equal(resolverCalls, 2);
     if (type === "COUNTDOWN") {
-      assert.deepEqual(Object.keys(singleBody).sort(), ["countdown", "serverNow"]);
+      assert.deepEqual(Object.keys(singleBody).sort(), [
+        "countdown",
+        "serverNow",
+      ]);
       assert.equal(singleBody.countdown.message, "all");
     } else {
       assert.equal(singleBody.message, "all");
@@ -1873,7 +2126,11 @@ test("actual proxy loaders match countries after page/schedule targeting and bef
 
 test("actual proxy loaders keep ALL on unknown or failed resolution and fail SELECTED closed", async () => {
   const cases = [
-    ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements"],
+    [
+      "../app/routes/api.proxy.announcement.ts",
+      "ANNOUNCEMENT",
+      "announcements",
+    ],
     ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices"],
     ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns"],
   ];
@@ -1987,16 +2244,16 @@ test("actual proxy loaders keep ALL on unknown or failed resolution and fail SEL
 
         assert.equal(response.headers.get("Cache-Control"), "no-store");
         assert.equal(resolverCalls, 1);
-        assert.deepEqual(body[plural].map((item) => item.message), ["all"]);
+        assert.deepEqual(
+          body[plural].map((item) => item.message),
+          ["all"],
+        );
         assert.doesNotMatch(
           JSON.stringify(body),
           /countryTargetingMode|targetCountryCodes|visitorIp|resolvedCountry/i,
         );
         if (type === "COUNTDOWN") assert.ok(body.serverNow);
-        assert.equal(
-          errors.length,
-          outcome === "rejected" ? 1 : 0,
-        );
+        assert.equal(errors.length, outcome === "rejected" ? 1 : 0);
         if (outcome === "rejected") {
           assert.match(errors[0], /country resolution failed/i);
           assert.doesNotMatch(errors[0], /synthetic resolver failure|US/);
@@ -2054,7 +2311,11 @@ test("signed country assertions work through all three proxy actions and invalid
     const { assertion: wrongShopAssertion } = await wrongShopResponse.json();
 
     const cases = [
-      ["../app/routes/api.proxy.announcement.ts", "ANNOUNCEMENT", "announcements"],
+      [
+        "../app/routes/api.proxy.announcement.ts",
+        "ANNOUNCEMENT",
+        "announcements",
+      ],
       ["../app/routes/api.proxy.notice.ts", "NOTICE", "notices"],
       ["../app/routes/api.proxy.countdown.ts", "COUNTDOWN", "countdowns"],
     ];
@@ -2240,7 +2501,10 @@ test("actual proxy loaders skip resolution when no page-eligible selection needs
         "../shopify.server": {
           authenticate: {
             public: {
-              appProxy: async () => ({ session: { shop: "proxy.test" }, admin: {} }),
+              appProxy: async () => ({
+                session: { shop: "proxy.test" },
+                admin: {},
+              }),
             },
           },
         },
@@ -2296,7 +2560,9 @@ test("actual proxy loaders skip resolution when no page-eligible selection needs
 test("real targeting context parser handles numeric IDs, precision, duplicates, and forged claims", () => {
   assert.deepEqual(
     readTargetingContext(
-      new URL("https://shop.test/a?np_page=product&np_product=9007199254740993"),
+      new URL(
+        "https://shop.test/a?np_page=product&np_product=9007199254740993",
+      ),
     ),
     {
       pageType: "product",
@@ -2316,13 +2582,17 @@ test("real targeting context parser handles numeric IDs, precision, duplicates, 
   );
   assert.equal(
     readTargetingContext(
-      new URL("https://shop.test/a?np_page=product&np_product=101&np_product=102"),
+      new URL(
+        "https://shop.test/a?np_page=product&np_product=101&np_product=102",
+      ),
     ).pageType,
     "other",
   );
   assert.equal(
     readTargetingContext(
-      new URL("https://shop.test/a?np_page=product&np_product=gid://shopify/Product/101"),
+      new URL(
+        "https://shop.test/a?np_page=product&np_product=gid://shopify/Product/101",
+      ),
     ).pageType,
     "other",
   );
@@ -2334,7 +2604,9 @@ test("real targeting context parser handles numeric IDs, precision, duplicates, 
   );
   assert.equal(
     readTargetingContext(
-      new URL("https://shop.test/a?np_page=product&np_product=101&np_collection=201"),
+      new URL(
+        "https://shop.test/a?np_page=product&np_product=101&np_collection=201",
+      ),
     ).pageType,
     "other",
   );
@@ -2346,7 +2618,9 @@ test("real targeting context parser handles numeric IDs, precision, duplicates, 
         targetCollectionIds: ["gid://shopify/Collection/201"],
       },
       readTargetingContext(
-        new URL("https://shop.test/a?np_page=product&np_product=101&np_collection=201"),
+        new URL(
+          "https://shop.test/a?np_page=product&np_product=101&np_collection=201",
+        ),
       ),
     ),
     false,
@@ -2362,7 +2636,10 @@ test("actual proxy auth failure skips database access and unknown modes fail clo
     let dbCalls = 0;
     let resolutionCalls = 0;
     const db = makeDb();
-    db.widget.findMany = async () => { dbCalls += 1; return []; };
+    db.widget.findMany = async () => {
+      dbCalls += 1;
+      return [];
+    };
     const mocks = {
       "../shopify.server": {
         authenticate: {
@@ -2374,17 +2651,25 @@ test("actual proxy auth failure skips database access and unknown modes fail clo
       "../db.server": { __esModule: true, default: db },
       "../features/widgets/widget.constants": {
         WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
-        WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+        WIDGET_TYPES: {
+          ANNOUNCEMENT: "ANNOUNCEMENT",
+          NOTICE: "NOTICE",
+          COUNTDOWN: "COUNTDOWN",
+        },
       },
       "../features/widgets/widget.server": { widgetScope: () => ({}) },
-      "../features/billing/storefront-plan.server": { getStorefrontWidgetLimit: async () => 1 },
+      "../features/billing/storefront-plan.server": {
+        getStorefrontWidgetLimit: async () => 1,
+      },
       "../features/widgets/targeting.shared": {
         __esModule: true,
         matchesTargeting,
         readTargetingContext,
         readTargetingForm,
       },
-      "../features/widgets/targeting.server": { getCachedMatchingCollectionIds: async () => [] },
+      "../features/widgets/targeting.server": {
+        getCachedMatchingCollectionIds: async () => [],
+      },
       "../features/widgets/country-resolution.server": {
         resolveVisitorCountry: async () => {
           resolutionCalls += 1;
@@ -2401,10 +2686,21 @@ test("actual proxy auth failure skips database access and unknown modes fail clo
     assert.equal(resolutionCalls, 0);
   }
 
-  assert.equal(matchesTargeting(
-    { targetingMode: "MYSTERY", targetProductIds: [], targetCollectionIds: [] },
-    { pageType: "product", productId: "gid://shopify/Product/101", collectionIds: [] },
-  ), false);
+  assert.equal(
+    matchesTargeting(
+      {
+        targetingMode: "MYSTERY",
+        targetProductIds: [],
+        targetCollectionIds: [],
+      },
+      {
+        pageType: "product",
+        productId: "gid://shopify/Product/101",
+        collectionIds: [],
+      },
+    ),
+    false,
+  );
 });
 
 test("proxy membership failure retains ALL/direct-product matches and excludes collection matches", async () => {
@@ -2482,16 +2778,27 @@ test("proxy membership failure retains ALL/direct-product matches and excludes c
     const mocks = {
       "../shopify.server": {
         authenticate: {
-          public: { appProxy: async () => ({ session: { shop: "shop.test" }, admin: {} }) },
+          public: {
+            appProxy: async () => ({
+              session: { shop: "shop.test" },
+              admin: {},
+            }),
+          },
         },
       },
       "../db.server": { __esModule: true, default: db },
       "../features/widgets/widget.constants": {
         WIDGET_STATUSES: { ACTIVE: "ACTIVE" },
-        WIDGET_TYPES: { ANNOUNCEMENT: "ANNOUNCEMENT", NOTICE: "NOTICE", COUNTDOWN: "COUNTDOWN" },
+        WIDGET_TYPES: {
+          ANNOUNCEMENT: "ANNOUNCEMENT",
+          NOTICE: "NOTICE",
+          COUNTDOWN: "COUNTDOWN",
+        },
       },
       "../features/widgets/widget.server": { widgetScope: () => ({}) },
-      "../features/billing/storefront-plan.server": { getStorefrontWidgetLimit: async () => 10 },
+      "../features/billing/storefront-plan.server": {
+        getStorefrontWidgetLimit: async () => 10,
+      },
       "../features/widgets/targeting.shared": {
         __esModule: true,
         matchesTargeting,
@@ -2504,17 +2811,28 @@ test("proxy membership failure retains ALL/direct-product matches and excludes c
     };
     const route = loadActualRoute(path, mocks);
     const multi = await route.loader({
-      request: new Request("https://shop.test/apps/notice-pro?np_page=product&np_product=101&format=multi"),
+      request: new Request(
+        "https://shop.test/apps/notice-pro?np_page=product&np_product=101&format=multi",
+      ),
     });
     const body = await multi.json();
-    assert.deepEqual(body[plural].map((item) => item.message), ["all", "direct"]);
+    assert.deepEqual(
+      body[plural].map((item) => item.message),
+      ["all", "direct"],
+    );
 
     const legacy = await route.loader({
-      request: new Request("https://shop.test/apps/notice-pro?np_page=product&np_product=101"),
+      request: new Request(
+        "https://shop.test/apps/notice-pro?np_page=product&np_product=101",
+      ),
     });
     const legacyBody = await legacy.json();
     if (path.includes("countdown")) {
-      assert.equal(typeof legacyBody.countdown?.message === "undefined" || legacyBody.countdown?.message === "all", true);
+      assert.equal(
+        typeof legacyBody.countdown?.message === "undefined" ||
+          legacyBody.countdown?.message === "all",
+        true,
+      );
       assert.ok(legacyBody.serverNow);
     } else {
       assert.equal(legacyBody.message, "all");
@@ -2541,7 +2859,10 @@ test("actual countdown route rejects new expired activation but not already-Acti
     textColor: "#FFFFFF",
     targetingMode: "ALL",
   };
-  assert.match((await route.action({ request: await actionRequest(base) })).error, /future deadline/i);
+  assert.match(
+    (await route.action({ request: await actionRequest(base) })).error,
+    /future deadline/i,
+  );
 
   db.widget.findFirst = async () => ({ id: "c1", status: "ACTIVE" });
   db.widget.updateMany = async (args) => {
@@ -2552,12 +2873,375 @@ test("actual countdown route rejects new expired activation but not already-Acti
     return { count: 1 };
   };
   const edited = await route.action({
-    request: await actionRequest({ ...base, _action: "update", widgetId: "c1" }),
+    request: await actionRequest({
+      ...base,
+      _action: "update",
+      widgetId: "c1",
+    }),
   });
   assert.ok(edited.redirect);
 
   db.widget.deleteMany = async () => ({ count: 0 });
-  assert.match((await route.action({
-    request: await actionRequest({ _action: "delete", widgetId: "foreign" }),
-  })).error, /could not be found/i);
+  assert.match(
+    (
+      await route.action({
+        request: await actionRequest({
+          _action: "delete",
+          widgetId: "foreign",
+        }),
+      })
+    ).error,
+    /could not be found/i,
+  );
+});
+
+test("scheduling actions reject missing or forged timezone fields and ignore client ISO overrides", async () => {
+  const db = makeDb();
+  const writes = [];
+
+  db.widget.create = async (args) => {
+    writes.push(args.data);
+    return args;
+  };
+
+  const { mocks, state } = makeAdminMocks({ db });
+
+  const countdownRoute = loadActualRoute(
+    "../app/routes/app.countdown.tsx",
+    mocks,
+  );
+
+  const announcementRoute = loadActualRoute(
+    "../app/routes/app.announcement.tsx",
+    mocks,
+  );
+
+  function rawRequest(entries) {
+    return new Request("https://shop.test/app/test", {
+      method: "POST",
+      body: form(entries),
+    });
+  }
+
+  const countdownBase = {
+    _action: "create",
+    name: "Schedule test",
+    message: "Ends soon",
+    status: "DRAFT",
+    countdownLocalTime: "2099-01-01T12:00",
+    countdownTimeZone: "UTC",
+    countdownDesktopOffset: "0",
+    countdownMobileOffset: "0",
+    backgroundColor: "#111111",
+    textColor: "#FFFFFF",
+    targetingMode: "ALL",
+  };
+
+  const missingZone = { ...countdownBase };
+  delete missingZone.countdownTimeZone;
+
+  const missingZoneResult = await countdownRoute.action({
+    request: rawRequest(missingZone),
+  });
+
+  assert.match(missingZoneResult.error, /timezone|outdated/i);
+  assert.equal(writes.length, 0);
+
+  const missingLocal = { ...countdownBase };
+  delete missingLocal.countdownLocalTime;
+
+  const missingLocalResult = await countdownRoute.action({
+    request: rawRequest(missingLocal),
+  });
+
+  assert.match(missingLocalResult.error, /deadline/i);
+  assert.equal(writes.length, 0);
+
+  const forgedZoneResult = await countdownRoute.action({
+    request: rawRequest({
+      ...countdownBase,
+      countdownTimeZone: "Asia/Dhaka",
+    }),
+  });
+
+  assert.match(forgedZoneResult.error, /timezone|outdated/i);
+  assert.equal(writes.length, 0);
+
+  const announcementMissingZone = await announcementRoute.action({
+    request: rawRequest({
+      _action: "create",
+      name: "Announcement",
+      message: "Hello",
+      status: "DRAFT",
+      startsAt: "",
+      endsAt: "",
+      targetingMode: "ALL",
+    }),
+  });
+
+  assert.match(announcementMissingZone.error, /timezone|outdated/i);
+  assert.equal(writes.length, 0);
+
+  state.timeZone = null;
+
+  const unavailableZoneResult = await countdownRoute.action({
+    request: rawRequest(countdownBase),
+  });
+
+  assert.match(unavailableZoneResult.error, /timezone.*unavailable/i);
+  assert.equal(writes.length, 0);
+
+  state.timeZone = "UTC";
+
+  const accepted = await countdownRoute.action({
+    request: rawRequest({
+      ...countdownBase,
+      countdownEndsAt: "2020-01-01T00:00:00.000Z",
+    }),
+  });
+
+  assert.ok(accepted.redirect);
+  assert.equal(writes.length, 1);
+
+  // The server uses local input + authenticated store timezone,
+  // not the conflicting client-provided ISO value.
+  assert.equal(
+    writes[0].countdownEndsAt.toISOString(),
+    "2099-01-01T12:00:00.000Z",
+  );
+});
+
+for (const noticeKind of ["GENERAL", "DISPATCH"]) {
+  test(`${noticeKind} schedule persists, preserves exact instants, and clears`, async () => {
+    const db = makeDb();
+    const { mocks, state } = makeAdminMocks({ db });
+    state.timeZone = "Asia/Dhaka";
+
+    let createdData;
+    let updatedData;
+
+    db.widget.create = async (args) => {
+      assert.equal(args.data.shopDomain, "shop.test");
+      createdData = args.data;
+      return args;
+    };
+
+    db.widget.updateMany = async (args) => {
+      assert.equal(args.where.shopDomain, "shop.test");
+      assert.equal(args.where.type, "NOTICE");
+      assert.equal(args.where.id, "n1");
+      updatedData = args.data;
+      return { count: 1 };
+    };
+
+    const route = loadActualRoute("../app/routes/app.notice.tsx", mocks);
+
+    const base = {
+      _action: "create",
+      name: "Scheduled Notice",
+      message: "Schedule test message",
+      noticeKind,
+      status: "DRAFT",
+      targetingMode: "ALL",
+      scheduleTimeZone: "Asia/Dhaka",
+      startsAt: "2026-11-25T23:30",
+      endsAt: "2026-11-25T23:45",
+    };
+
+    function rawRequest(entries) {
+      return new Request("https://shop.test/app/notice", {
+        method: "POST",
+        body: form(entries),
+      });
+    }
+
+    const created = await route.action({
+      request: rawRequest(base),
+    });
+
+    assert.ok(created.redirect);
+    assert.equal(createdData.noticeKind, noticeKind);
+    assert.equal(
+      createdData.startsAt.toISOString(),
+      "2026-11-25T17:30:00.000Z",
+    );
+    assert.equal(createdData.endsAt.toISOString(), "2026-11-25T17:45:00.000Z");
+
+    const saved = {
+      id: "n1",
+      status: "DRAFT",
+      noticeKind,
+      startsAt: new Date("2026-11-25T17:30:00.123Z"),
+      endsAt: new Date("2026-11-25T17:45:00.456Z"),
+    };
+
+    db.widget.findFirst = async () => saved;
+
+    const updated = await route.action({
+      request: rawRequest({
+        ...base,
+        _action: "update",
+        widgetId: "n1",
+        message: "Changed message only",
+      }),
+    });
+
+    assert.ok(updated.redirect);
+    assert.equal(
+      updatedData.startsAt.toISOString(),
+      "2026-11-25T17:30:00.123Z",
+    );
+    assert.equal(updatedData.endsAt.toISOString(), "2026-11-25T17:45:00.456Z");
+
+    const cleared = await route.action({
+      request: rawRequest({
+        ...base,
+        _action: "update",
+        widgetId: "n1",
+        startsAt: "",
+        endsAt: "",
+      }),
+    });
+
+    assert.ok(cleared.redirect);
+    assert.equal(updatedData.startsAt, null);
+    assert.equal(updatedData.endsAt, null);
+  });
+
+  test(`${noticeKind} schedule rejects invalid or incomplete writes`, async () => {
+    const db = makeDb();
+    const { mocks, state } = makeAdminMocks({ db });
+    state.timeZone = "Asia/Dhaka";
+
+    let writes = 0;
+
+    db.widget.create = async (args) => {
+      writes++;
+      return args;
+    };
+
+    db.widget.updateMany = async () => {
+      writes++;
+      return { count: 1 };
+    };
+
+    const route = loadActualRoute("../app/routes/app.notice.tsx", mocks);
+
+    const base = {
+      _action: "create",
+      name: "Validation test",
+      message: "No invalid saves",
+      noticeKind,
+      status: "DRAFT",
+      targetingMode: "ALL",
+      scheduleTimeZone: "Asia/Dhaka",
+      startsAt: "2026-11-25T23:30",
+      endsAt: "2026-11-25T23:45",
+    };
+
+    async function submit(entries) {
+      return route.action({
+        request: new Request("https://shop.test/app/notice", {
+          method: "POST",
+          body: form(entries),
+        }),
+      });
+    }
+
+    const missingZone = { ...base };
+    delete missingZone.scheduleTimeZone;
+
+    const missingStart = { ...base };
+    delete missingStart.startsAt;
+
+    const missingEnd = { ...base };
+    delete missingEnd.endsAt;
+
+    const cases = [
+      ["missing timezone", missingZone],
+      ["missing start field", missingStart],
+      ["missing end field", missingEnd],
+      ["forged timezone", { ...base, scheduleTimeZone: "UTC" }],
+      ["invalid date", { ...base, startsAt: "2026-02-30T12:00" }],
+      ["equal start and end", { ...base, endsAt: base.startsAt }],
+      ["end before start", { ...base, endsAt: "2026-11-25T23:00" }],
+    ];
+
+    for (const [label, entries] of cases) {
+      const result = await submit(entries);
+      assert.equal(typeof result.error, "string", label);
+      assert.equal(writes, 0, label);
+    }
+
+    state.timeZone = null;
+
+    const unavailable = await submit(base);
+    assert.match(unavailable.error, /timezone.*unavailable/i);
+    assert.equal(writes, 0);
+
+    state.timeZone = "America/New_York";
+
+    const missingDstTime = await submit({
+      ...base,
+      scheduleTimeZone: "America/New_York",
+      startsAt: "2026-03-08T02:30",
+      endsAt: "2026-03-08T04:00",
+    });
+
+    assert.match(missingDstTime.error, /does not exist/i);
+    assert.equal(writes, 0);
+  });
+}
+
+test("all three scheduling actions reject forms opened before a store timezone change", async () => {
+  for (const solution of ["announcement", "notice", "countdown"]) {
+    const db = makeDb();
+    const { mocks, state } = makeAdminMocks({ db });
+
+    // Form was opened with UTC; shop now uses Asia/Dhaka.
+    state.timeZone = "Asia/Dhaka";
+
+    let writes = 0;
+
+    db.widget.create = async (args) => {
+      writes++;
+      return args;
+    };
+
+    db.widget.updateMany = async () => {
+      writes++;
+      return { count: 1 };
+    };
+
+    const route = loadActualRoute(`../app/routes/app.${solution}.tsx`, mocks);
+
+    const entries = {
+      _action: "create",
+      name: "Stale timezone form",
+      message: "Must not save",
+      noticeKind: "GENERAL",
+      status: "DRAFT",
+      targetingMode: "ALL",
+      scheduleTimeZone: "UTC",
+      startsAt: "2099-01-01T12:00",
+      endsAt: "2099-01-01T13:00",
+      countdownTimeZone: "UTC",
+      countdownLocalTime: "2099-01-01T13:00",
+      countdownDesktopOffset: "0",
+      countdownMobileOffset: "0",
+      backgroundColor: "#111111",
+      textColor: "#FFFFFF",
+    };
+
+    const result = await route.action({
+      request: new Request(`https://shop.test/app/${solution}`, {
+        method: "POST",
+        body: form(entries),
+      }),
+    });
+
+    assert.match(result.error, /timezone.*changed|form.*outdated/i, solution);
+
+    assert.equal(writes, 0, solution);
+  }
 });
